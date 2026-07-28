@@ -66,6 +66,22 @@ class AddressMatchResult(StrEnum):
     UNKNOWN = "unknown"
 
 
+class PolicyRoute(StrEnum):
+    PROCEED_TO_DISPOSITION = "proceed_to_disposition"
+    REQUEST_MORE_INFORMATION = "request_more_information"
+    REQUIRE_HUMAN_REVIEW = "require_human_review"
+
+
+class PolicyPlaceholder(StrEnum):
+    CUSTOMER_RESPONSE_WAIT_POLICY = "CUSTOMER_RESPONSE_WAIT_POLICY"
+    EVIDENCE_FRESHNESS_POLICY = "EVIDENCE_FRESHNESS_POLICY"
+    EXTERNAL_FOLLOW_UP_DEADLINE_POLICY = "EXTERNAL_FOLLOW_UP_DEADLINE_POLICY"
+    FRONTLINE_REFUND_AUTHORITY = "FRONTLINE_REFUND_AUTHORITY"
+    REPLACEMENT_ELIGIBILITY_POLICY = "REPLACEMENT_ELIGIBILITY_POLICY"
+    CARRIER_CLAIM_ELIGIBILITY = "CARRIER_CLAIM_ELIGIBILITY"
+    RISK_REVIEW_TRIGGER_POLICY = "RISK_REVIEW_TRIGGER_POLICY"
+
+
 class TransitionRejected(Exception):
     """Raised after an invalid domain mutation has been recorded and rejected."""
 
@@ -255,6 +271,97 @@ class CarrierEvidenceSnapshot:
         _require_utc_aware(self.retrieved_at, "retrieved_at")
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyEvaluationResult:
+    evaluation_id: str
+    route: PolicyRoute
+    evaluated_at: datetime
+    evidence_summary: tuple[str, ...]
+    unresolved_policies: tuple[PolicyPlaceholder, ...]
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "evidence_summary", tuple(self.evidence_summary))
+        object.__setattr__(self, "unresolved_policies", tuple(self.unresolved_policies))
+        object.__setattr__(self, "reasons", tuple(self.reasons))
+        _require_non_empty(self.evaluation_id, "evaluation_id")
+        if not isinstance(self.route, PolicyRoute):
+            raise ValueError("route must be a PolicyRoute")
+        _require_utc_aware(self.evaluated_at, "evaluated_at")
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.evidence_summary
+        ):
+            raise ValueError("evidence_summary entries must be non-empty strings")
+        if any(
+            not isinstance(item, PolicyPlaceholder)
+            for item in self.unresolved_policies
+        ):
+            raise ValueError(
+                "unresolved_policies entries must be PolicyPlaceholder values"
+            )
+        if not self.reasons or any(
+            not isinstance(reason, str) or not reason.strip()
+            for reason in self.reasons
+        ):
+            raise ValueError("at least one non-empty reason is required")
+
+
+@dataclass(frozen=True, slots=True)
+class HumanReviewRequest:
+    review_id: str
+    opened_at: datetime
+    reason: str
+    unresolved_policies: tuple[PolicyPlaceholder, ...]
+    evidence_snapshot_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "unresolved_policies", tuple(self.unresolved_policies)
+        )
+        object.__setattr__(
+            self, "evidence_snapshot_ids", tuple(self.evidence_snapshot_ids)
+        )
+        _require_non_empty(self.review_id, "review_id")
+        _require_non_empty(self.reason, "reason")
+        _require_utc_aware(self.opened_at, "opened_at")
+        if any(
+            not isinstance(item, PolicyPlaceholder)
+            for item in self.unresolved_policies
+        ):
+            raise ValueError(
+                "unresolved_policies entries must be PolicyPlaceholder values"
+            )
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.evidence_snapshot_ids
+        ):
+            raise ValueError("evidence_snapshot_ids entries must be non-empty strings")
+        if not self.unresolved_policies and not self.evidence_snapshot_ids:
+            raise ValueError(
+                "human review requires an unresolved policy or evidence reference"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class HumanReviewDecision:
+    review_id: str
+    decided_at: datetime
+    reviewer: str
+    disposition: Disposition
+    rationale: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.review_id, "review_id")
+        _require_non_empty(self.reviewer, "reviewer")
+        _require_non_empty(self.rationale, "rationale")
+        _require_utc_aware(self.decided_at, "decided_at")
+        if not isinstance(self.disposition, Disposition):
+            raise ValueError("disposition must be a Disposition")
+        if self.disposition is Disposition.NONE_SELECTED:
+            raise ValueError("disposition must not be NONE_SELECTED")
+
+
 _CUSTOMER_ACTION_DISPOSITIONS = {
     Disposition.REQUEST_MORE_INFO,
     Disposition.ADVISE_SELF_CHECK_OR_WAIT,
@@ -332,6 +439,9 @@ class SupportCase:
         self._carrier_evidence_snapshots: list[CarrierEvidenceSnapshot] = []
         self._address_match_result = AddressMatchResult.UNKNOWN
         self._address_match_recorded = False
+        self._policy_evaluation_results: list[PolicyEvaluationResult] = []
+        self._human_review_requests: list[HumanReviewRequest] = []
+        self._human_review_decisions: list[HumanReviewDecision] = []
         self._audit_events: list[AuditEvent] = []
         self._integrity_alerts: list[OperationalIntegrityAlert] = []
         state = self.snapshot()
@@ -388,6 +498,22 @@ class SupportCase:
     @property
     def address_match_result(self) -> AddressMatchResult:
         return self._address_match_result
+
+    @property
+    def address_match_recorded(self) -> bool:
+        return self._address_match_recorded
+
+    @property
+    def policy_evaluation_results(self) -> tuple[PolicyEvaluationResult, ...]:
+        return tuple(self._policy_evaluation_results)
+
+    @property
+    def human_review_requests(self) -> tuple[HumanReviewRequest, ...]:
+        return tuple(self._human_review_requests)
+
+    @property
+    def human_review_decisions(self) -> tuple[HumanReviewDecision, ...]:
+        return tuple(self._human_review_decisions)
 
     @property
     def audit_events(self) -> tuple[AuditEvent, ...]:
@@ -524,6 +650,130 @@ class SupportCase:
             self._closed_at = datetime.now(UTC)
         self._append_event("state_transition", actor, before, self.snapshot(), detail)
 
+    def record_policy_evaluation(
+        self, result: PolicyEvaluationResult, *, actor: str
+    ) -> None:
+        before = self.snapshot()
+        if self._case_status is not CaseStatus.POLICY_REVIEW:
+            self._reject(
+                "policy evaluation is only allowed during policy_review",
+                actor,
+                before,
+            )
+        if any(
+            existing.evaluation_id == result.evaluation_id
+            for existing in self._policy_evaluation_results
+        ):
+            self._reject(
+                f"policy evaluation {result.evaluation_id!r} is already recorded",
+                actor,
+                before,
+            )
+        routes = {
+            PolicyRoute.PROCEED_TO_DISPOSITION: CaseStatus.DISPOSITION_SELECTION,
+            PolicyRoute.REQUEST_MORE_INFORMATION: CaseStatus.AWAITING_CUSTOMER_ACTION,
+            PolicyRoute.REQUIRE_HUMAN_REVIEW: CaseStatus.HUMAN_REVIEW,
+        }
+        self._policy_evaluation_results.append(result)
+        self._case_status = routes[result.route]
+        self._append_event("policy_evaluation_recorded", actor, before, self.snapshot())
+
+    def open_human_review(
+        self, request: HumanReviewRequest, *, actor: str
+    ) -> None:
+        before = self.snapshot()
+        if self._case_status is not CaseStatus.HUMAN_REVIEW:
+            self._reject(
+                "human review can only be opened during human_review", actor, before
+            )
+        if any(
+            existing.review_id == request.review_id
+            for existing in self._human_review_requests
+        ):
+            self._reject(
+                f"human review {request.review_id!r} is already open", actor, before
+            )
+        latest_policies = (
+            set(self._policy_evaluation_results[-1].unresolved_policies)
+            if self._policy_evaluation_results
+            else set()
+        )
+        unknown_policies = set(request.unresolved_policies) - latest_policies
+        if unknown_policies:
+            self._reject(
+                f"human review references policies absent from latest evaluation: "
+                f"{sorted(policy.value for policy in unknown_policies)!r}",
+                actor,
+                before,
+            )
+        known_evidence_ids = {
+            evidence.snapshot_id for evidence in self._carrier_evidence_snapshots
+        }
+        unknown_evidence = set(request.evidence_snapshot_ids) - known_evidence_ids
+        if unknown_evidence:
+            self._reject(
+                f"human review references unknown evidence: "
+                f"{sorted(unknown_evidence)!r}",
+                actor,
+                before,
+            )
+        self._human_review_requests.append(request)
+        self._append_event("human_review_opened", actor, before, self.snapshot())
+
+    def record_human_review_decision(
+        self,
+        decision: HumanReviewDecision,
+        *,
+        actor: str,
+        execution_data_present: bool = True,
+    ) -> None:
+        before = self.snapshot()
+        if self._case_status is not CaseStatus.HUMAN_REVIEW:
+            self._reject(
+                "human review decision is only allowed during human_review",
+                actor,
+                before,
+            )
+        if not any(
+            request.review_id == decision.review_id
+            for request in self._human_review_requests
+        ):
+            self._reject(
+                f"no open human review matches {decision.review_id!r}", actor, before
+            )
+        if any(
+            existing.review_id == decision.review_id
+            for existing in self._human_review_decisions
+        ):
+            self._reject(
+                f"human review {decision.review_id!r} already has a decision",
+                actor,
+                before,
+            )
+        next_state = self._validated_disposition_path(
+            decision.disposition,
+            execution_data_present=execution_data_present,
+            actor=actor,
+            before=before,
+        )
+        self._apply_disposition_path(decision.disposition, next_state)
+        self._human_review_decisions.append(decision)
+        after = self.snapshot()
+        self._append_event(
+            "human_review_decision_recorded",
+            decision.reviewer,
+            before,
+            after,
+            decision.rationale,
+        )
+        self._append_event(
+            "disposition_selected",
+            decision.reviewer,
+            before,
+            after,
+            decision.rationale,
+        )
+
     def select_disposition(
         self,
         disposition: Disposition,
@@ -540,6 +790,23 @@ class SupportCase:
                 actor,
                 before,
             )
+        next_state = self._validated_disposition_path(
+            disposition,
+            execution_data_present=execution_data_present,
+            actor=actor,
+            before=before,
+        )
+        self._apply_disposition_path(disposition, next_state)
+        self._append_event("disposition_selected", actor, before, self.snapshot(), detail)
+
+    def _validated_disposition_path(
+        self,
+        disposition: Disposition,
+        *,
+        execution_data_present: bool,
+        actor: str,
+        before: StateSnapshot,
+    ) -> tuple[CaseStatus, ExecutionStatus, datetime | None]:
         if disposition is Disposition.NONE_SELECTED:
             self._reject("none_selected is not a selectable outcome", actor, before)
         if not isinstance(disposition, Disposition):
@@ -564,11 +831,18 @@ class SupportCase:
         else:  # Kept defensive if the enum grows without a corresponding lifecycle rule.
             self._reject(f"{disposition} has no disposition path", actor, before)
 
+        return next_case_status, next_execution_status, next_closed_at
+
+    def _apply_disposition_path(
+        self,
+        disposition: Disposition,
+        next_state: tuple[CaseStatus, ExecutionStatus, datetime | None],
+    ) -> None:
+        next_case_status, next_execution_status, next_closed_at = next_state
         self._disposition = disposition
         self._case_status = next_case_status
         self._execution_status = next_execution_status
         self._closed_at = next_closed_at
-        self._append_event("disposition_selected", actor, before, self.snapshot(), detail)
 
     def record_execution_status(
         self, status: ExecutionStatus, *, actor: str, detail: str | None = None
@@ -684,3 +958,92 @@ class SupportCase:
                 detail,
             )
         )
+
+
+def evaluate_synthetic_structural_policy(
+    case: SupportCase,
+    *,
+    evaluation_id: str,
+    evaluated_at: datetime,
+    unresolved_policies: tuple[PolicyPlaceholder, ...] = (),
+) -> PolicyEvaluationResult:
+    """Evaluate structural completeness without applying retailer policy."""
+    unresolved_policies = tuple(unresolved_policies)
+    if any(
+        not isinstance(policy, PolicyPlaceholder) for policy in unresolved_policies
+    ):
+        raise ValueError(
+            "unresolved_policies entries must be PolicyPlaceholder values"
+        )
+
+    evidence_summary: list[str] = []
+    missing: list[str] = []
+    failed: list[str] = []
+
+    if case.customer_report is None:
+        missing.append("customer report")
+    else:
+        evidence_summary.append("customer report present")
+    for label, reference in (
+        ("customer reference", case.customer_ref),
+        ("order reference", case.order_ref),
+    ):
+        if reference is None:
+            missing.append(label)
+        elif reference.retrieval_status is RetrievalStatus.FAILURE:
+            failed.append(label)
+        else:
+            evidence_summary.append(f"{label} retrieval succeeded")
+    if not case.shipment_refs:
+        missing.append("shipment reference")
+    else:
+        if any(
+            shipment.retrieval_status is RetrievalStatus.FAILURE
+            for shipment in case.shipment_refs
+        ):
+            failed.append("shipment reference")
+        else:
+            evidence_summary.append("shipment reference retrieval succeeded")
+    if not case.carrier_evidence_snapshots:
+        missing.append("carrier evidence")
+    else:
+        if any(
+            evidence.retrieval_status is RetrievalStatus.FAILURE
+            for evidence in case.carrier_evidence_snapshots
+        ):
+            failed.append("carrier evidence")
+        else:
+            evidence_summary.append("carrier evidence retrieval succeeded")
+    if not case.address_match_recorded:
+        missing.append("address result")
+    elif case.address_match_result is AddressMatchResult.MISMATCH:
+        evidence_summary.append("address mismatch recorded")
+    else:
+        evidence_summary.append(
+            f"address result recorded: {case.address_match_result.value}"
+        )
+
+    if failed:
+        route = PolicyRoute.REQUIRE_HUMAN_REVIEW
+        reasons = (f"retrieval failed: {', '.join(failed)}",)
+    elif case.address_match_result is AddressMatchResult.MISMATCH:
+        route = PolicyRoute.REQUIRE_HUMAN_REVIEW
+        reasons = ("address mismatch requires human review",)
+    elif unresolved_policies:
+        route = PolicyRoute.REQUIRE_HUMAN_REVIEW
+        reasons = ("unresolved policy prevents deterministic action",)
+    elif missing:
+        route = PolicyRoute.REQUEST_MORE_INFORMATION
+        reasons = (f"required structural evidence missing: {', '.join(missing)}",)
+    else:
+        route = PolicyRoute.PROCEED_TO_DISPOSITION
+        reasons = ("required structural evidence is complete",)
+
+    return PolicyEvaluationResult(
+        evaluation_id,
+        route,
+        evaluated_at,
+        tuple(evidence_summary),
+        unresolved_policies,
+        reasons,
+    )
