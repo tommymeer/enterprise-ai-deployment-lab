@@ -1,21 +1,58 @@
 from dataclasses import FrozenInstanceError
-from datetime import UTC
+from datetime import UTC, datetime, timedelta, timezone
 import unittest
 
 from support_agent import (
+    AddressMatchResult,
+    CarrierEvidenceSnapshot,
     CaseStatus,
+    CustomerReference,
+    CustomerReport,
     Disposition,
     ExecutionStatus,
     FollowUpStatus,
+    MatchStatus,
+    OrderReference,
+    RetrievalStatus,
+    ShipmentReference,
     SupportCase,
     TransitionRejected,
 )
 
 
 class SupportCaseTest(unittest.TestCase):
+    def matched_customer(self) -> CustomerReference:
+        return CustomerReference(
+            "customer-001",
+            MatchStatus.MATCHED,
+            datetime(2026, 7, 28, 12, tzinfo=UTC),
+            RetrievalStatus.SUCCESS,
+        )
+
+    def matched_order(self) -> OrderReference:
+        return OrderReference(
+            "order-001",
+            MatchStatus.MATCHED,
+            "49.95 USD",
+            "home_goods",
+            "100 Example Ave",
+            datetime(2026, 7, 28, 12, 1, tzinfo=UTC),
+            RetrievalStatus.SUCCESS,
+        )
+
+    def shipment(self, ref_id: str = "shipment-001") -> ShipmentReference:
+        return ShipmentReference(
+            ref_id,
+            "Synthetic Carrier",
+            "tracking-001",
+            datetime(2026, 7, 27, 10, tzinfo=UTC),
+            datetime(2026, 7, 28, 12, 2, tzinfo=UTC),
+            RetrievalStatus.SUCCESS,
+        )
+
     def case_at_disposition_selection(self) -> SupportCase:
         case = SupportCase("case-001")
-        case.link("customer-001", "order-001", actor="agent")
+        case.link(self.matched_customer(), self.matched_order(), actor="agent")
         case.transition_to(CaseStatus.EVIDENCE_GATHERING, actor="agent")
         case.transition_to(CaseStatus.POLICY_REVIEW, actor="agent")
         case.transition_to(CaseStatus.DISPOSITION_SELECTION, actor="policy")
@@ -178,15 +215,332 @@ class SupportCaseTest(unittest.TestCase):
         self.assertEqual(case.audit_events[-1].after_state, before)
         self.assertEqual(len(case.integrity_alerts), 1)
 
-    def test_missing_linkage_data_preserves_state(self) -> None:
+    def test_ambiguous_customer_match_preserves_state(self) -> None:
         case = SupportCase("case-001")
         before = case.snapshot()
+        customer = CustomerReference(
+            "customer-lookup-001",
+            MatchStatus.AMBIGUOUS,
+            datetime(2026, 7, 28, 12, tzinfo=UTC),
+            RetrievalStatus.SUCCESS,
+        )
 
         with self.assertRaises(TransitionRejected):
-            case.link("", "order-001", actor="agent")
+            case.link(customer, self.matched_order(), actor="agent")
 
         self.assertEqual(case.snapshot(), before)
+        self.assertIsNone(case.customer_ref)
+        self.assertIsNone(case.order_ref)
         self.assertEqual(len(case.integrity_alerts), 1)
+
+    def test_successful_structured_linkage_stores_references(self) -> None:
+        case = SupportCase("case-001")
+        customer = self.matched_customer()
+        order = self.matched_order()
+
+        case.link(customer, order, actor="agent")
+
+        self.assertEqual(case.case_status, CaseStatus.LINKED)
+        self.assertIs(case.customer_ref, customer)
+        self.assertIs(case.order_ref, order)
+
+    def test_failed_order_retrieval_preserves_state(self) -> None:
+        case = SupportCase("case-001")
+        before = case.snapshot()
+        order = OrderReference(
+            "order-lookup-001",
+            MatchStatus.NOT_FOUND,
+            None,
+            None,
+            None,
+            datetime(2026, 7, 28, 12, tzinfo=UTC),
+            RetrievalStatus.FAILURE,
+        )
+
+        with self.assertRaises(TransitionRejected):
+            case.link(self.matched_customer(), order, actor="agent")
+
+        self.assertEqual(case.snapshot(), before)
+        self.assertIsNone(case.customer_ref)
+        self.assertIsNone(case.order_ref)
+        self.assertEqual(case.audit_events[-1].event_type, "transition_rejected")
+        self.assertEqual(len(case.integrity_alerts), 1)
+
+    def test_customer_report_and_address_match_are_recorded(self) -> None:
+        case = SupportCase("case-001")
+        report = CustomerReport(
+            "tracking-001",
+            "100 Example Ave",
+            "Checked porch and mailroom at 11:00 UTC",
+            "Household members and neighbors",
+            datetime(2026, 7, 28, 11, tzinfo=UTC),
+        )
+
+        case.record_customer_report(report, actor="agent")
+        case.record_address_match_result(AddressMatchResult.MATCH, actor="agent")
+
+        self.assertIs(case.customer_report, report)
+        self.assertEqual(case.address_match_result, AddressMatchResult.MATCH)
+
+    def test_invalid_address_match_is_audited_without_changing_case(self) -> None:
+        case = SupportCase("case-001")
+        before = case.snapshot()
+        event_count = len(case.audit_events)
+
+        with self.assertRaises(TransitionRejected):
+            case.record_address_match_result("match", actor="agent")  # type: ignore[arg-type]
+
+        self.assertEqual(case.snapshot(), before)
+        self.assertEqual(case.address_match_result, AddressMatchResult.UNKNOWN)
+        self.assertEqual(len(case.audit_events), event_count + 1)
+        self.assertEqual(case.audit_events[-1].event_type, "transition_rejected")
+        self.assertEqual(case.audit_events[-1].before_state, before)
+        self.assertEqual(case.audit_events[-1].after_state, before)
+        self.assertEqual(len(case.integrity_alerts), 1)
+
+    def test_shipment_attachment_and_duplicate_rejection(self) -> None:
+        case = SupportCase("case-001")
+        shipment = self.shipment()
+        case.attach_shipment(shipment, actor="order-system")
+        before = case.snapshot()
+
+        self.assertEqual(case.shipment_refs, (shipment,))
+        with self.assertRaises(TransitionRejected):
+            case.attach_shipment(shipment, actor="order-system")
+
+        self.assertEqual(case.snapshot(), before)
+        self.assertEqual(case.shipment_refs, (shipment,))
+        self.assertEqual(case.audit_events[-1].event_type, "transition_rejected")
+        self.assertEqual(len(case.integrity_alerts), 1)
+
+    def test_carrier_evidence_requires_known_shipment(self) -> None:
+        case = SupportCase("case-001")
+        evidence = CarrierEvidenceSnapshot(
+            "snapshot-001",
+            "shipment-missing",
+            None,
+            None,
+            (),
+            None,
+            datetime(2026, 7, 28, 12, tzinfo=UTC),
+            RetrievalStatus.FAILURE,
+        )
+
+        with self.assertRaises(TransitionRejected):
+            case.attach_carrier_evidence(evidence, actor="carrier-system")
+
+        self.assertEqual(case.carrier_evidence_snapshots, ())
+        self.assertEqual(len(case.integrity_alerts), 1)
+
+    def test_failed_carrier_retrieval_needs_no_delivery_evidence(self) -> None:
+        case = SupportCase("case-001")
+        case.attach_shipment(self.shipment(), actor="order-system")
+        evidence = CarrierEvidenceSnapshot(
+            "snapshot-001",
+            "shipment-001",
+            None,
+            None,
+            (),
+            None,
+            datetime(2026, 7, 28, 12, 3, tzinfo=UTC),
+            RetrievalStatus.FAILURE,
+        )
+
+        case.attach_carrier_evidence(evidence, actor="carrier-system")
+
+        self.assertEqual(case.carrier_evidence_snapshots, (evidence,))
+        self.assertIsNone(evidence.delivery_status)
+        self.assertEqual(evidence.tracking_event_history, ())
+
+    def test_successful_carrier_evidence_stores_retrieved_facts(self) -> None:
+        case = SupportCase("case-001")
+        case.attach_shipment(self.shipment(), actor="order-system")
+        delivered_at = datetime(2026, 7, 28, 9, 30, tzinfo=UTC)
+        evidence = CarrierEvidenceSnapshot(
+            "snapshot-001",
+            "shipment-001",
+            "delivered",
+            delivered_at,
+            ("out_for_delivery", "delivered"),
+            True,
+            datetime(2026, 7, 28, 12, 3, tzinfo=UTC),
+            RetrievalStatus.SUCCESS,
+        )
+
+        case.attach_carrier_evidence(evidence, actor="carrier-system")
+
+        stored = case.carrier_evidence_snapshots[0]
+        self.assertEqual(stored.delivery_status, "delivered")
+        self.assertEqual(stored.delivery_timestamp, delivered_at)
+        self.assertEqual(
+            stored.tracking_event_history, ("out_for_delivery", "delivered")
+        )
+        self.assertTrue(stored.picture_proof_available)
+
+    def test_duplicate_carrier_evidence_snapshot_is_not_added(self) -> None:
+        case = SupportCase("case-001")
+        case.attach_shipment(self.shipment(), actor="order-system")
+        evidence = CarrierEvidenceSnapshot(
+            "snapshot-001",
+            "shipment-001",
+            None,
+            None,
+            (),
+            None,
+            datetime(2026, 7, 28, 12, 3, tzinfo=UTC),
+            RetrievalStatus.FAILURE,
+        )
+        case.attach_carrier_evidence(evidence, actor="carrier-system")
+
+        with self.assertRaises(TransitionRejected):
+            case.attach_carrier_evidence(evidence, actor="carrier-system")
+
+        self.assertEqual(case.carrier_evidence_snapshots, (evidence,))
+        self.assertEqual(case.audit_events[-1].event_type, "transition_rejected")
+        self.assertEqual(len(case.integrity_alerts), 1)
+
+    def test_plain_string_retrieval_status_cannot_bypass_invariants(self) -> None:
+        with self.assertRaises(ValueError):
+            ShipmentReference(
+                "shipment-001",
+                "Synthetic Carrier",
+                "tracking-001",
+                None,
+                datetime(2026, 7, 28, 12, tzinfo=UTC),
+                "failure",  # type: ignore[arg-type]
+            )
+
+    def test_plain_string_match_status_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            CustomerReference(
+                "customer-001",
+                "matched",  # type: ignore[arg-type]
+                datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.SUCCESS,
+            )
+
+    def test_whitespace_only_evidence_identifiers_are_rejected(self) -> None:
+        constructors = (
+            lambda: CustomerReference(
+                " \t", MatchStatus.NOT_FOUND, datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.SUCCESS,
+            ),
+            lambda: OrderReference(
+                "\n", MatchStatus.NOT_FOUND, None, None, None,
+                datetime(2026, 7, 28, 12, tzinfo=UTC), RetrievalStatus.SUCCESS,
+            ),
+            lambda: ShipmentReference(
+                "  ", None, None, None, datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.FAILURE,
+            ),
+            lambda: CarrierEvidenceSnapshot(
+                "\t", "shipment-001", None, None, (), None,
+                datetime(2026, 7, 28, 12, tzinfo=UTC), RetrievalStatus.FAILURE,
+            ),
+            lambda: CarrierEvidenceSnapshot(
+                "snapshot-001", "\n", None, None, (), None,
+                datetime(2026, 7, 28, 12, tzinfo=UTC), RetrievalStatus.FAILURE,
+            ),
+        )
+
+        for constructor in constructors:
+            with self.subTest(constructor=constructor):
+                with self.assertRaises(ValueError):
+                    constructor()
+
+    def test_failed_carrier_retrieval_with_delivery_facts_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            CarrierEvidenceSnapshot(
+                "snapshot-001",
+                "shipment-001",
+                "delivered",
+                None,
+                (),
+                None,
+                datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.FAILURE,
+            )
+
+    def test_successful_carrier_retrieval_without_status_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            CarrierEvidenceSnapshot(
+                "snapshot-001",
+                "shipment-001",
+                None,
+                None,
+                (),
+                False,
+                datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.SUCCESS,
+            )
+
+    def test_failed_order_retrieval_with_details_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            OrderReference(
+                "order-001",
+                MatchStatus.NOT_FOUND,
+                "49.95 USD",
+                None,
+                None,
+                datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.FAILURE,
+            )
+
+    def test_matched_order_without_minimum_facts_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            OrderReference(
+                "order-001",
+                MatchStatus.MATCHED,
+                "49.95 USD",
+                "",
+                "100 Example Ave",
+                datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.SUCCESS,
+            )
+
+    def test_failed_shipment_retrieval_with_tracking_facts_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(ValueError):
+            ShipmentReference(
+                "shipment-001",
+                "Synthetic Carrier",
+                "tracking-001",
+                None,
+                datetime(2026, 7, 28, 12, tzinfo=UTC),
+                RetrievalStatus.FAILURE,
+            )
+
+    def test_public_evidence_collections_are_read_only(self) -> None:
+        case = SupportCase("case-001")
+        case.attach_shipment(self.shipment(), actor="order-system")
+
+        with self.assertRaises(AttributeError):
+            case.shipment_refs.append(self.shipment("shipment-002"))  # type: ignore[attr-defined]
+        with self.assertRaises(AttributeError):
+            case.carrier_evidence_snapshots.append(None)  # type: ignore[attr-defined]
+
+    def test_evidence_records_are_immutable_and_require_utc(self) -> None:
+        customer = self.matched_customer()
+        with self.assertRaises(FrozenInstanceError):
+            customer.ref_id = "changed"  # type: ignore[misc]
+
+        with self.assertRaises(ValueError):
+            CustomerReference(
+                "customer-001",
+                MatchStatus.MATCHED,
+                datetime(2026, 7, 28, 12),
+                RetrievalStatus.SUCCESS,
+            )
+        with self.assertRaises(ValueError):
+            CustomerReference(
+                "customer-001",
+                MatchStatus.MATCHED,
+                datetime(
+                    2026, 7, 28, 12, tzinfo=timezone(timedelta(hours=-4))
+                ),
+                RetrievalStatus.SUCCESS,
+            )
 
     def test_unknown_disposition_is_rejected_without_closing(self) -> None:
         case = self.case_at_disposition_selection()

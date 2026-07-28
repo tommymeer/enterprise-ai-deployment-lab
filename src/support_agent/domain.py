@@ -49,6 +49,23 @@ class FollowUpStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class RetrievalStatus(StrEnum):
+    SUCCESS = "success"
+    FAILURE = "failure"
+
+
+class MatchStatus(StrEnum):
+    MATCHED = "matched"
+    AMBIGUOUS = "ambiguous"
+    NOT_FOUND = "not_found"
+
+
+class AddressMatchResult(StrEnum):
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    UNKNOWN = "unknown"
+
+
 class TransitionRejected(Exception):
     """Raised after an invalid domain mutation has been recorded and rejected."""
 
@@ -80,6 +97,162 @@ class OperationalIntegrityAlert:
     case_id: str
     actor: str
     detail: str
+
+
+def _require_utc_aware(value: datetime, field_name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    if value.utcoffset() != UTC.utcoffset(value):
+        raise ValueError(f"{field_name} must use UTC")
+
+
+def _require_non_empty(value: str, field_name: str) -> None:
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerReport:
+    order_or_tracking_identifier_provided: str
+    delivery_address_as_stated: str
+    when_and_how_checked: str
+    other_possible_recipients_noted: str
+    reported_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_utc_aware(self.reported_at, "reported_at")
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerReference:
+    ref_id: str
+    match_status: MatchStatus
+    retrieved_at: datetime
+    retrieval_status: RetrievalStatus
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.ref_id, "ref_id")
+        if not isinstance(self.match_status, MatchStatus):
+            raise ValueError("match_status must be a MatchStatus")
+        if not isinstance(self.retrieval_status, RetrievalStatus):
+            raise ValueError("retrieval_status must be a RetrievalStatus")
+        if (
+            self.retrieval_status is RetrievalStatus.FAILURE
+            and self.match_status is MatchStatus.MATCHED
+        ):
+            raise ValueError("failed customer retrieval must not be matched")
+        _require_utc_aware(self.retrieved_at, "retrieved_at")
+
+
+@dataclass(frozen=True, slots=True)
+class OrderReference:
+    ref_id: str
+    match_status: MatchStatus
+    order_value: str | None
+    item_category: str | None
+    ship_to_address_on_file: str | None
+    retrieved_at: datetime
+    retrieval_status: RetrievalStatus
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.ref_id, "ref_id")
+        if not isinstance(self.match_status, MatchStatus):
+            raise ValueError("match_status must be a MatchStatus")
+        if not isinstance(self.retrieval_status, RetrievalStatus):
+            raise ValueError("retrieval_status must be a RetrievalStatus")
+        matched_order_facts = (
+            self.order_value,
+            self.item_category,
+            self.ship_to_address_on_file,
+        )
+        if self.retrieval_status is RetrievalStatus.FAILURE:
+            if self.match_status is MatchStatus.MATCHED:
+                raise ValueError("failed order retrieval must not be matched")
+            if any(fact is not None for fact in matched_order_facts):
+                raise ValueError("failed order retrieval must not contain order facts")
+        elif self.match_status is MatchStatus.MATCHED and any(
+            not fact for fact in matched_order_facts
+        ):
+            raise ValueError("matched order retrieval requires all order facts")
+        _require_utc_aware(self.retrieved_at, "retrieved_at")
+
+
+@dataclass(frozen=True, slots=True)
+class ShipmentReference:
+    ref_id: str
+    carrier: str | None
+    tracking_id: str | None
+    fulfillment_timestamp: datetime | None
+    retrieved_at: datetime
+    retrieval_status: RetrievalStatus
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.ref_id, "ref_id")
+        if not isinstance(self.retrieval_status, RetrievalStatus):
+            raise ValueError("retrieval_status must be a RetrievalStatus")
+        shipment_facts = (
+            self.carrier,
+            self.tracking_id,
+            self.fulfillment_timestamp,
+        )
+        if self.retrieval_status is RetrievalStatus.FAILURE:
+            if any(fact is not None for fact in shipment_facts):
+                raise ValueError(
+                    "failed shipment retrieval must not contain shipment facts"
+                )
+        elif not self.carrier or not self.tracking_id:
+            raise ValueError(
+                "successful shipment retrieval requires carrier and tracking_id"
+            )
+        if self.fulfillment_timestamp is not None:
+            _require_utc_aware(
+                self.fulfillment_timestamp, "fulfillment_timestamp"
+            )
+        _require_utc_aware(self.retrieved_at, "retrieved_at")
+
+
+@dataclass(frozen=True, slots=True)
+class CarrierEvidenceSnapshot:
+    snapshot_id: str
+    shipment_ref: str
+    delivery_status: str | None
+    delivery_timestamp: datetime | None
+    tracking_event_history: tuple[str, ...]
+    picture_proof_available: bool | None
+    retrieved_at: datetime
+    retrieval_status: RetrievalStatus
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "tracking_event_history", tuple(self.tracking_event_history)
+        )
+        _require_non_empty(self.snapshot_id, "snapshot_id")
+        _require_non_empty(self.shipment_ref, "shipment_ref")
+        if not isinstance(self.retrieval_status, RetrievalStatus):
+            raise ValueError("retrieval_status must be a RetrievalStatus")
+        if self.retrieval_status is RetrievalStatus.FAILURE:
+            if (
+                self.delivery_status is not None
+                or self.delivery_timestamp is not None
+                or self.tracking_event_history
+                or self.picture_proof_available is not None
+            ):
+                raise ValueError(
+                    "failed carrier retrieval must not contain delivery facts"
+                )
+        else:
+            if not self.delivery_status:
+                raise ValueError(
+                    "successful carrier retrieval requires delivery_status"
+                )
+            if type(self.picture_proof_available) is not bool:
+                raise ValueError(
+                    "successful carrier retrieval requires boolean "
+                    "picture_proof_available"
+                )
+        if self.delivery_timestamp is not None:
+            _require_utc_aware(self.delivery_timestamp, "delivery_timestamp")
+        _require_utc_aware(self.retrieved_at, "retrieved_at")
 
 
 _CUSTOMER_ACTION_DISPOSITIONS = {
@@ -152,8 +325,13 @@ class SupportCase:
         self._follow_up_status = FollowUpStatus.NOT_APPLICABLE
         self._opened_at = datetime.now(UTC)
         self._closed_at: datetime | None = None
-        self._customer_ref: str | None = None
-        self._order_ref: str | None = None
+        self._customer_report: CustomerReport | None = None
+        self._customer_ref: CustomerReference | None = None
+        self._order_ref: OrderReference | None = None
+        self._shipment_refs: list[ShipmentReference] = []
+        self._carrier_evidence_snapshots: list[CarrierEvidenceSnapshot] = []
+        self._address_match_result = AddressMatchResult.UNKNOWN
+        self._address_match_recorded = False
         self._audit_events: list[AuditEvent] = []
         self._integrity_alerts: list[OperationalIntegrityAlert] = []
         state = self.snapshot()
@@ -188,6 +366,30 @@ class SupportCase:
         return self._closed_at
 
     @property
+    def customer_report(self) -> CustomerReport | None:
+        return self._customer_report
+
+    @property
+    def customer_ref(self) -> CustomerReference | None:
+        return self._customer_ref
+
+    @property
+    def order_ref(self) -> OrderReference | None:
+        return self._order_ref
+
+    @property
+    def shipment_refs(self) -> tuple[ShipmentReference, ...]:
+        return tuple(self._shipment_refs)
+
+    @property
+    def carrier_evidence_snapshots(self) -> tuple[CarrierEvidenceSnapshot, ...]:
+        return tuple(self._carrier_evidence_snapshots)
+
+    @property
+    def address_match_result(self) -> AddressMatchResult:
+        return self._address_match_result
+
+    @property
     def audit_events(self) -> tuple[AuditEvent, ...]:
         return tuple(self._audit_events)
 
@@ -204,19 +406,100 @@ class SupportCase:
             self._closed_at,
         )
 
-    def link(self, customer_ref: str, order_ref: str, *, actor: str) -> None:
-        """Complete intake with the minimal structural linkage data."""
+    def record_customer_report(
+        self, report: CustomerReport, *, actor: str
+    ) -> None:
+        before = self.snapshot()
+        if self._customer_report is not None:
+            self._reject("customer report is already recorded", actor, before)
+        self._customer_report = report
+        self._append_event("customer_report_recorded", actor, before, self.snapshot())
+
+    def link(
+        self,
+        customer_ref: CustomerReference,
+        order_ref: OrderReference,
+        *,
+        actor: str,
+    ) -> None:
+        """Store successful structured references and complete intake."""
         before = self.snapshot()
         if self._case_status is not CaseStatus.INTAKE:
             self._reject("linkage is only allowed from intake", actor, before)
-        if not customer_ref or not order_ref:
+        if (
+            customer_ref.retrieval_status is not RetrievalStatus.SUCCESS
+            or customer_ref.match_status is not MatchStatus.MATCHED
+        ):
             self._reject(
-                "customer_ref and order_ref are required to enter linked", actor, before
+                "customer reference must be successfully retrieved and matched",
+                actor,
+                before,
+            )
+        if (
+            order_ref.retrieval_status is not RetrievalStatus.SUCCESS
+            or order_ref.match_status is not MatchStatus.MATCHED
+        ):
+            self._reject(
+                "order reference must be successfully retrieved and matched",
+                actor,
+                before,
             )
         self._customer_ref = customer_ref
         self._order_ref = order_ref
         self._case_status = CaseStatus.LINKED
         self._append_event("state_transition", actor, before, self.snapshot())
+
+    def attach_shipment(
+        self, shipment_ref: ShipmentReference, *, actor: str
+    ) -> None:
+        before = self.snapshot()
+        if any(
+            existing.ref_id == shipment_ref.ref_id
+            for existing in self._shipment_refs
+        ):
+            self._reject(
+                f"shipment {shipment_ref.ref_id!r} is already attached", actor, before
+            )
+        self._shipment_refs.append(shipment_ref)
+        self._append_event("shipment_attached", actor, before, self.snapshot())
+
+    def attach_carrier_evidence(
+        self, evidence: CarrierEvidenceSnapshot, *, actor: str
+    ) -> None:
+        before = self.snapshot()
+        if not any(
+            shipment.ref_id == evidence.shipment_ref
+            for shipment in self._shipment_refs
+        ):
+            self._reject(
+                f"carrier evidence references unknown shipment "
+                f"{evidence.shipment_ref!r}",
+                actor,
+                before,
+            )
+        if any(
+            existing.snapshot_id == evidence.snapshot_id
+            for existing in self._carrier_evidence_snapshots
+        ):
+            self._reject(
+                f"carrier evidence {evidence.snapshot_id!r} is already attached",
+                actor,
+                before,
+            )
+        self._carrier_evidence_snapshots.append(evidence)
+        self._append_event("carrier_evidence_attached", actor, before, self.snapshot())
+
+    def record_address_match_result(
+        self, result: AddressMatchResult, *, actor: str
+    ) -> None:
+        before = self.snapshot()
+        if not isinstance(result, AddressMatchResult):
+            self._reject(f"{result!r} is not a valid address match result", actor, before)
+        if self._address_match_recorded:
+            self._reject("address match result is already recorded", actor, before)
+        self._address_match_result = result
+        self._address_match_recorded = True
+        self._append_event("address_match_recorded", actor, before, self.snapshot())
 
     def fail_intake(self, *, actor: str, detail: str | None = None) -> None:
         before = self.snapshot()
