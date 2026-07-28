@@ -53,6 +53,10 @@ not optional polish added at the end:
 A project is not considered complete until it has addressed these concerns, not just produced a
 working demo. See `docs/lab-operating-standard.md` for the full standard.
 
+Repository instructions in `AGENTS.md` currently govern approval, batching, and budget safety for
+future paid model calls. Code-level token tracking, cost accounting, and spending enforcement have
+not yet been built; the application does not currently claim to provide those controls.
+
 ## What this repository is — and isn't
 
 This repository is a **learning and engineering record**. It documents reasoning, decisions,
