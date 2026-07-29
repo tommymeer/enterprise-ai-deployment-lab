@@ -25,6 +25,20 @@ from .domain import (
     TransitionRejected,
     evaluate_synthetic_structural_policy,
 )
+from .workflow import (
+    ExecutionResult,
+    SyntheticAddressComparison,
+    SyntheticCarrierEvidenceLookup,
+    SyntheticCustomerLookup,
+    SyntheticExecutionAdapter,
+    SyntheticHumanReviewer,
+    SyntheticOrderLookup,
+    SyntheticShipmentLookup,
+    SyntheticSupportCaseInput,
+    WorkflowConfiguration,
+    WorkflowResult,
+    run_synthetic_support_case,
+)
 
 __all__ = [
     "AddressMatchResult",
@@ -50,4 +64,16 @@ __all__ = [
     "SupportCase",
     "TransitionRejected",
     "evaluate_synthetic_structural_policy",
+    "ExecutionResult",
+    "SyntheticAddressComparison",
+    "SyntheticCarrierEvidenceLookup",
+    "SyntheticCustomerLookup",
+    "SyntheticExecutionAdapter",
+    "SyntheticHumanReviewer",
+    "SyntheticOrderLookup",
+    "SyntheticShipmentLookup",
+    "SyntheticSupportCaseInput",
+    "WorkflowConfiguration",
+    "WorkflowResult",
+    "run_synthetic_support_case",
 ]
