@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 import unittest
 
@@ -9,12 +9,15 @@ from support_agent import (
     CustomerReference,
     Disposition,
     ExecutionResult,
+    ExecutionOperation,
+    ExecutionRegistry,
     ExecutionStatus,
     FollowUpStatus,
     HumanReviewDecision,
     HumanReviewRequest,
     MatchStatus,
     OrderReference,
+    OperationStatus,
     PolicyPlaceholder,
     RetrievalStatus,
     ShipmentReference,
@@ -29,6 +32,7 @@ from support_agent import (
     SyntheticSupportCaseInput,
     WorkflowConfiguration,
     WorkflowResult,
+    generate_idempotency_key,
     run_synthetic_support_case,
 )
 
@@ -142,8 +146,9 @@ class WorkflowTest(unittest.TestCase):
         address: AddressMatchResult = AddressMatchResult.MATCH,
         unresolved: tuple[PolicyPlaceholder, ...] = (),
         reviewer: SyntheticHumanReviewer | None = None,
-        execution: SyntheticExecutionAdapter | None = None,
+        execution: object | None = None,
         customer: CustomerReference | None = None,
+        registry: ExecutionRegistry | None = None,
     ) -> WorkflowConfiguration:
         evidence_result = self.evidence() if evidence is ... else evidence
         return WorkflowConfiguration(
@@ -157,7 +162,209 @@ class WorkflowTest(unittest.TestCase):
             self.now,
             unresolved,
             reviewer,
+            registry or ExecutionRegistry(),
         )
+
+    def test_idempotency_key_uses_only_case_and_executable_disposition(self) -> None:
+        refund = generate_idempotency_key("case-001", Disposition.APPROVE_REFUND)
+        self.assertEqual(
+            refund,
+            generate_idempotency_key("case-001", Disposition.APPROVE_REFUND),
+        )
+        self.assertNotEqual(
+            refund,
+            generate_idempotency_key("case-001", Disposition.APPROVE_REPLACEMENT),
+        )
+        self.assertNotEqual(
+            refund,
+            generate_idempotency_key("case-002", Disposition.APPROVE_REFUND),
+        )
+        for invalid in (Disposition.DENY, Disposition.REQUEST_MORE_INFO):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                generate_idempotency_key("case-001", invalid)
+        with self.assertRaises(ValueError):
+            generate_idempotency_key("", Disposition.APPROVE_REFUND)
+
+    def test_shared_registry_suppresses_duplicate_and_reuses_result(self) -> None:
+        registry = ExecutionRegistry()
+        calls: list[str] = []
+
+        def execution(
+            key: str, disposition: Disposition, case: SupportCase
+        ) -> ExecutionResult:
+            calls.append(key)
+            return ExecutionResult(True, "original refund reference")
+
+        configuration = self.configuration(execution=execution, registry=registry)
+        first = run_synthetic_support_case(self.case_input(), configuration)
+        duplicate = run_synthetic_support_case(self.case_input(), configuration)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first.execution_operation, duplicate.execution_operation)
+        self.assertEqual(
+            duplicate.execution_operation.result_detail,  # type: ignore[union-attr]
+            "original refund reference",
+        )
+        event = next(
+            e
+            for e in duplicate.trace_events
+            if e.event_type == "duplicate_execution_suppressed"
+        )
+        self.assertEqual(event.detail, "execution adapter was not called")
+        self.assertIn(
+            "prior_successful_result_reused",
+            [e.event_type for e in duplicate.trace_events],
+        )
+
+    def test_failed_attempt_can_retry_then_success_is_suppressed(self) -> None:
+        registry = ExecutionRegistry()
+        calls = 0
+
+        def execution(
+            key: str, disposition: Disposition, case: SupportCase
+        ) -> ExecutionResult:
+            nonlocal calls
+            calls += 1
+            return ExecutionResult(calls > 1, f"attempt {calls}")
+
+        configuration = self.configuration(execution=execution, registry=registry)
+        failed = run_synthetic_support_case(self.case_input(), configuration)
+        succeeded = run_synthetic_support_case(self.case_input(), configuration)
+        suppressed = run_synthetic_support_case(self.case_input(), configuration)
+        self.assertEqual(
+            failed.execution_operation.status,  # type: ignore[union-attr]
+            OperationStatus.FAILED,
+        )
+        self.assertEqual(
+            succeeded.execution_operation.status,  # type: ignore[union-attr]
+            OperationStatus.SUCCEEDED,
+        )
+        self.assertEqual(
+            succeeded.execution_operation.attempt_count, 2  # type: ignore[union-attr]
+        )
+        self.assertEqual(
+            failed.execution_operation.idempotency_key,  # type: ignore[union-attr]
+            succeeded.execution_operation.idempotency_key,  # type: ignore[union-attr]
+        )
+        self.assertEqual(calls, 2)
+        self.assertEqual(suppressed.execution_operation, succeeded.execution_operation)
+        self.assertIn(
+            "later_retry_attempted", [e.event_type for e in succeeded.trace_events]
+        )
+        self.assertIn(
+            "failed_operation_recorded", [e.event_type for e in failed.trace_events]
+        )
+
+    def test_carrier_inquiry_is_idempotent(self) -> None:
+        registry = ExecutionRegistry()
+        calls = 0
+
+        def execution(
+            key: str, disposition: Disposition, case: SupportCase
+        ) -> ExecutionResult:
+            nonlocal calls
+            calls += 1
+            return ExecutionResult(True, "carrier inquiry reference")
+
+        configuration = self.configuration(
+            disposition=Disposition.OPEN_CARRIER_INQUIRY,
+            execution=execution,
+            registry=registry,
+        )
+        run_synthetic_support_case(self.case_input(), configuration)
+        duplicate = run_synthetic_support_case(self.case_input(), configuration)
+        self.assertEqual(calls, 1)
+        self.assertEqual(
+            duplicate.final_case_status, CaseStatus.AWAITING_EXTERNAL_FOLLOW_UP
+        )
+
+    def test_non_executable_dispositions_have_no_operation(self) -> None:
+        for disposition in (
+            Disposition.DENY,
+            Disposition.REQUEST_MORE_INFO,
+            Disposition.ADVISE_SELF_CHECK_OR_WAIT,
+        ):
+            with self.subTest(disposition=disposition):
+                result = run_synthetic_support_case(
+                    self.case_input(), self.configuration(disposition=disposition)
+                )
+                self.assertIsNone(result.execution_operation)
+
+    def test_registry_rejects_wrong_identity_and_public_records_are_read_only(self) -> None:
+        registry = ExecutionRegistry()
+        key = generate_idempotency_key("case-001", Disposition.APPROVE_REFUND)
+        operation, _ = registry.get_or_create(
+            key, "case-001", Disposition.APPROVE_REFUND, self.now
+        )
+        with self.assertRaises(ValueError):
+            registry.get_or_create(
+                key, "case-002", Disposition.APPROVE_REFUND, self.now
+            )
+        with self.assertRaises(ValueError):
+            registry.get_or_create(
+                key, "case-001", Disposition.APPROVE_REPLACEMENT, self.now
+            )
+        with self.assertRaises(FrozenInstanceError):
+            operation.status = OperationStatus.FAILED  # type: ignore[misc]
+        with self.assertRaises(TypeError):
+            registry.operations[key] = operation  # type: ignore[index]
+
+    def test_execution_operation_rejects_invalid_values(self) -> None:
+        valid = dict(
+            operation_id="operation",
+            idempotency_key=generate_idempotency_key(
+                "case", Disposition.APPROVE_REFUND
+            ),
+            case_id="case",
+            disposition=Disposition.APPROVE_REFUND,
+            requested_at=self.now,
+            status=OperationStatus.NOT_STARTED,
+            result_detail=None,
+            attempt_count=0,
+        )
+        for change in (
+            {"operation_id": ""},
+            {"idempotency_key": ""},
+            {"idempotency_key": "inconsistent-key"},
+            {"case_id": ""},
+            {"disposition": Disposition.DENY},
+            {"requested_at": datetime(2026, 7, 28)},
+            {"status": "failed"},
+            {"attempt_count": -1},
+            {"status": OperationStatus.IN_PROGRESS, "attempt_count": 0},
+            {"status": OperationStatus.SUCCEEDED, "attempt_count": 1},
+        ):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                ExecutionOperation(**(valid | change))  # type: ignore[arg-type]
+
+    def test_workflow_result_rejects_mismatched_execution_operation_identity(self) -> None:
+        result = run_synthetic_support_case(self.case_input(), self.configuration())
+        operation = result.execution_operation
+        self.assertIsNotNone(operation)
+
+        other_case_operation = replace(
+            operation,
+            case_id="case-002",
+            idempotency_key=generate_idempotency_key(
+                "case-002", Disposition.APPROVE_REFUND
+            ),
+        )
+        with self.assertRaises(ValueError):
+            replace(result, execution_operation=other_case_operation)
+
+        other_disposition_operation = replace(
+            operation,
+            disposition=Disposition.APPROVE_REPLACEMENT,
+            idempotency_key=generate_idempotency_key(
+                "case-001", Disposition.APPROVE_REPLACEMENT
+            ),
+        )
+        with self.assertRaises(ValueError):
+            replace(result, execution_operation=other_disposition_operation)
+
+        corrupted_key_operation = replace(operation)
+        object.__setattr__(corrupted_key_operation, "idempotency_key", "corrupt-key")
+        with self.assertRaises(ValueError):
+            replace(result, execution_operation=corrupted_key_operation)
 
     def test_refund_success_closes_case(self) -> None:
         result = run_synthetic_support_case(
@@ -181,7 +388,9 @@ class WorkflowTest(unittest.TestCase):
     def test_denial_closes_without_execution(self) -> None:
         calls = 0
 
-        def execution(disposition: Disposition, case: SupportCase) -> ExecutionResult:
+        def execution(
+            key: str, disposition: Disposition, case: SupportCase
+        ) -> ExecutionResult:
             nonlocal calls
             calls += 1
             return ExecutionResult(True, "should not be called")
@@ -332,10 +541,30 @@ class WorkflowTest(unittest.TestCase):
 
     def test_execution_adapter_supports_all_configured_outcomes(self) -> None:
         adapter = self.execution(refund=True, replacement=False, inquiry=True)
-        case = SupportCase("case")
-        self.assertTrue(adapter(Disposition.APPROVE_REFUND, case).succeeded)
-        self.assertFalse(adapter(Disposition.APPROVE_REPLACEMENT, case).succeeded)
-        self.assertTrue(adapter(Disposition.OPEN_CARRIER_INQUIRY, case).succeeded)
+        for disposition, succeeded in (
+            (Disposition.APPROVE_REFUND, True),
+            (Disposition.APPROVE_REPLACEMENT, False),
+            (Disposition.OPEN_CARRIER_INQUIRY, True),
+        ):
+            with self.subTest(disposition=disposition):
+                case = run_synthetic_support_case(
+                    self.case_input(), self.configuration(disposition=disposition)
+                ).case
+                key = generate_idempotency_key(case.case_id, disposition)
+                self.assertIs(adapter(key, disposition, case).succeeded, succeeded)
+
+    def test_execution_adapter_rejects_inconsistent_identity(self) -> None:
+        adapter = self.execution()
+        case = run_synthetic_support_case(
+            self.case_input(), self.configuration()
+        ).case
+        with self.assertRaises(ValueError):
+            adapter("wrong-key", Disposition.APPROVE_REFUND, case)
+        replacement_key = generate_idempotency_key(
+            case.case_id, Disposition.APPROVE_REPLACEMENT
+        )
+        with self.assertRaises(ValueError):
+            adapter(replacement_key, Disposition.APPROVE_REPLACEMENT, case)
 
 
 if __name__ == "__main__":

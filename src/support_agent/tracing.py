@@ -67,12 +67,24 @@ class WorkflowTraceEvent:
     human_override: bool | None = None
     final_outcome: str | None = None
     detail: str | None = None
+    operation_id: str | None = None
+    idempotency_key: str | None = None
+    attempt_count: int | None = None
+    operation_status: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("trace_id", "step", "event_type", "case_id"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must not be empty")
+        for name in ("operation_id", "idempotency_key", "operation_status"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{name} must not be empty when present")
+        if self.attempt_count is not None and (
+            type(self.attempt_count) is not int or self.attempt_count < 0
+        ):
+            raise ValueError("attempt_count must be non-negative when present")
         if type(self.sequence_number) is not int or self.sequence_number < 0:
             raise ValueError("sequence_number must be a non-negative integer")
         if not isinstance(self.occurred_at, datetime):

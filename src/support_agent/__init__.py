@@ -39,6 +39,12 @@ from .workflow import (
     WorkflowResult,
     run_synthetic_support_case,
 )
+from .execution import (
+    ExecutionOperation,
+    ExecutionRegistry,
+    OperationStatus,
+    generate_idempotency_key,
+)
 from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
 
 __all__ = [
@@ -79,4 +85,8 @@ __all__ = [
     "run_synthetic_support_case",
     "WorkflowTraceCollector",
     "WorkflowTraceEvent",
+    "ExecutionOperation",
+    "ExecutionRegistry",
+    "OperationStatus",
+    "generate_idempotency_key",
 ]

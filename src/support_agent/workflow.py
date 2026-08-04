@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Callable
@@ -25,6 +25,12 @@ from .domain import (
     ShipmentReference,
     SupportCase,
     evaluate_synthetic_structural_policy,
+)
+from .execution import (
+    ExecutionOperation,
+    ExecutionRegistry,
+    OperationStatus,
+    generate_idempotency_key,
 )
 from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
 
@@ -85,6 +91,7 @@ class WorkflowResult:
     failure_reason: str | None = None
     trace_id: str = ""
     trace_events: tuple[WorkflowTraceEvent, ...] = ()
+    execution_operation: ExecutionOperation | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.case, SupportCase):
@@ -116,6 +123,20 @@ class WorkflowResult:
             range(len(self.trace_events))
         ):
             raise ValueError("trace events must be ordered and contiguous")
+        if self.execution_operation is not None and not isinstance(
+            self.execution_operation, ExecutionOperation
+        ):
+            raise ValueError("execution_operation must be an ExecutionOperation")
+        if self.execution_operation is not None:
+            if self.execution_operation.case_id != self.case.case_id:
+                raise ValueError("execution operation case_id must match case")
+            if self.execution_operation.disposition is not self.case.disposition:
+                raise ValueError("execution operation disposition must match case")
+            expected_key = generate_idempotency_key(
+                self.case.case_id, self.case.disposition
+            )
+            if self.execution_operation.idempotency_key != expected_key:
+                raise ValueError("execution operation idempotency key must match case")
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +193,19 @@ class SyntheticExecutionAdapter:
     replacement: ExecutionResult
     carrier_inquiry: ExecutionResult
 
-    def __call__(self, disposition: Disposition, case: SupportCase) -> ExecutionResult:
+    def __call__(
+        self,
+        idempotency_key: str,
+        disposition: Disposition,
+        case: SupportCase,
+    ) -> ExecutionResult:
+        if not isinstance(case, SupportCase):
+            raise ValueError("case must be a SupportCase")
+        expected_key = generate_idempotency_key(case.case_id, disposition)
+        if disposition is not case.disposition:
+            raise ValueError("disposition must match case")
+        if idempotency_key != expected_key:
+            raise ValueError("idempotency key does not match case and disposition")
         results = {
             Disposition.APPROVE_REFUND: self.refund,
             Disposition.APPROVE_REPLACEMENT: self.replacement,
@@ -205,7 +238,7 @@ CarrierLookup = Callable[[ShipmentReference], CarrierEvidenceSnapshot | None]
 AddressComparison = Callable[
     [SyntheticSupportCaseInput, OrderReference], AddressMatchResult
 ]
-ExecutionAdapter = Callable[[Disposition, SupportCase], ExecutionResult]
+ExecutionAdapter = Callable[[str, Disposition, SupportCase], ExecutionResult]
 HumanReviewer = Callable[
     [SupportCase], tuple[HumanReviewRequest, HumanReviewDecision]
 ]
@@ -223,6 +256,7 @@ class WorkflowConfiguration:
     evaluated_at: datetime
     unresolved_policies: tuple[PolicyPlaceholder, ...] = ()
     human_reviewer: HumanReviewer | None = None
+    execution_registry: ExecutionRegistry = field(default_factory=ExecutionRegistry)
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -250,6 +284,8 @@ class WorkflowConfiguration:
             )
         if self.human_reviewer is not None and not callable(self.human_reviewer):
             raise ValueError("human_reviewer must be callable")
+        if not isinstance(self.execution_registry, ExecutionRegistry):
+            raise ValueError("execution_registry must be an ExecutionRegistry")
 
 
 def _result(
@@ -259,6 +295,7 @@ def _result(
     completed: bool = True,
     failure_stage: str | None = None,
     failure_reason: str | None = None,
+    execution_operation: ExecutionOperation | None = None,
 ) -> WorkflowResult:
     return WorkflowResult(
         case,
@@ -269,6 +306,7 @@ def _result(
         failure_reason,
         trace.trace_id,
         trace.events,
+        execution_operation,
     )
 
 
@@ -584,23 +622,90 @@ def run_synthetic_support_case(
         record("workflow", "workflow_completed", final_outcome=case.case_status.value)
         return _result(case, trace)
 
+    idempotency_key = generate_idempotency_key(case.case_id, case.disposition)
+    operation, created = configuration.execution_registry.get_or_create(
+        idempotency_key, case.case_id, case.disposition, event_clock()
+    )
+    operation_trace = {
+        "operation_id": operation.operation_id,
+        "idempotency_key": operation.idempotency_key,
+        "attempt_count": operation.attempt_count,
+        "operation_status": operation.status.value,
+    }
+    if created:
+        record("execution", "execution_operation_created", **operation_trace)
+
     change(
         "execution",
         "execution_started",
         lambda: case.record_execution_status(
             ExecutionStatus.IN_PROGRESS, actor="synthetic-execution"
         ),
+        **operation_trace,
     )
-    execution = tool_call(
-        "execution",
-        "synthetic_execution_adapter",
-        {"case_id": case.case_id, "disposition": case.disposition.value},
-        lambda: configuration.execution(case.disposition, case),
-        lambda value: {
-            "succeeded": value.succeeded,
-            "detail_present": bool(value.detail),
-        },
-    )
+
+    if operation.status is OperationStatus.SUCCEEDED:
+        record(
+            "execution",
+            "duplicate_execution_suppressed",
+            detail="execution adapter was not called",
+            **operation_trace,
+        )
+        record(
+            "execution",
+            "prior_successful_result_reused",
+            detail="original successful result reused",
+            **operation_trace,
+        )
+        execution = ExecutionResult(True, operation.result_detail or "recorded success")
+    else:
+        was_retry = operation.status is OperationStatus.FAILED
+        operation = configuration.execution_registry.start_attempt(idempotency_key)
+        operation_trace = {
+            "operation_id": operation.operation_id,
+            "idempotency_key": operation.idempotency_key,
+            "attempt_count": operation.attempt_count,
+            "operation_status": operation.status.value,
+        }
+        if was_retry:
+            record("execution", "later_retry_attempted", **operation_trace)
+        record("execution", "execution_adapter_invoked", **operation_trace)
+        execution = tool_call(
+            "execution",
+            "synthetic_execution_adapter",
+            {
+                "case_id": case.case_id,
+                "disposition": case.disposition.value,
+                "idempotency_key": idempotency_key,
+            },
+            lambda: configuration.execution(idempotency_key, case.disposition, case),
+            lambda value: {
+                "succeeded": value.succeeded,
+                "detail_present": bool(value.detail),
+            },
+        )
+        operation = (
+            configuration.execution_registry.record_success(
+                idempotency_key, execution.detail
+            )
+            if execution.succeeded
+            else configuration.execution_registry.record_failure(
+                idempotency_key, execution.detail
+            )
+        )
+        operation_trace = {
+            "operation_id": operation.operation_id,
+            "idempotency_key": operation.idempotency_key,
+            "attempt_count": operation.attempt_count,
+            "operation_status": operation.status.value,
+        }
+        record(
+            "execution",
+            "successful_operation_recorded"
+            if execution.succeeded
+            else "failed_operation_recorded",
+            **operation_trace,
+        )
     status = (
         ExecutionStatus.SUCCEEDED
         if execution.succeeded
@@ -613,6 +718,7 @@ def run_synthetic_support_case(
             status, actor="synthetic-execution", detail=execution.detail
         ),
         final_outcome=status.value,
+        **operation_trace,
     )
     if execution.succeeded:
         change(
@@ -625,7 +731,7 @@ def run_synthetic_support_case(
             ),
         )
         record("workflow", "workflow_completed", final_outcome=case.case_status.value)
-        return _result(case, trace)
+        return _result(case, trace, execution_operation=operation)
 
     change(
         "execution",
@@ -647,4 +753,5 @@ def run_synthetic_support_case(
         completed=False,
         failure_stage="execution",
         failure_reason=execution.detail,
+        execution_operation=operation,
     )
