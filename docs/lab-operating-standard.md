@@ -81,6 +81,50 @@ project's own docs — it's a checklist for the practitioner, not for a reviewer
 - State where the abstraction may not apply.
 - Test it against at least one case outside the original happy path or workflow.
 
+## Downstream production and evaluation requirements
+
+The following are additions to this project standard. They are requirements for downstream
+implementation and evaluation, not claims about capabilities that already exist and not reasons to
+skip the required project sequence. The default architecture remains a modular monolith with a
+deterministic workflow; models perform bounded tasks inside that workflow. These requirements must
+not trigger premature multi-agent systems, distributed services, observability platforms, model
+routers, or other infrastructure.
+
+- **Full workflow tracing** — When the workflow is implemented, each case must be reconstructable
+  through a trace ID and records of the workflow step; state before and after; model and prompt
+  version; retrieved context; tool name, arguments, and result; latency; retries; token usage and
+  estimated cost; evaluation result; escalation or human override; and final outcome. Traces must
+  follow the repository's data-safety rules.
+- **Explicit execution budgets** — Bound model calls, tool calls, retries, loop iterations, total
+  latency, and estimated cost per case. Exceeding a budget must cause safe termination or
+  escalation, never unbounded execution.
+- **Rate-limit and capacity failure testing** — Test provider and dependency throttling,
+  saturation, timeouts, and unavailable capacity, including the workflow's safe response and
+  recovery behavior.
+- **Idempotent consequential actions** — Refunds, replacements, messages, claims, and other
+  consequential external actions must use an operation identity or equivalent control so retries
+  cannot knowingly duplicate the real-world effect.
+- **Layered evaluations** — Evaluate classification, extraction, evidence sufficiency, policy
+  selection, tool choice, tool parameters, state transitions, final outcome, abstention,
+  escalation correctness, and repeated-run consistency separately where each layer applies. Do not
+  let an acceptable final answer conceal an unsafe intermediate decision.
+- **Production failures become regression tests** — Convert every reproducible production failure
+  into the smallest relevant deterministic test or evaluation case before or alongside repair,
+  using sanitized or synthetic data.
+- **Deliberate context construction** — Select, order, label, limit, and version model context for
+  the bounded task; do not treat all available data or an ever-growing transcript as the default
+  prompt.
+- **Provider-neutral model interface** — Keep workflow contracts and domain behavior independent
+  of a provider SDK. Add only the smallest interface needed for the models actually evaluated; do
+  not build a speculative model router.
+- **Governance as executable controls** — Express approved permissions, data handling, policy
+  constraints, review requirements, and budget limits as testable runtime controls wherever the
+  system can enforce them, with human ownership for unresolved policy.
+- **Simplicity before complexity** — Meet these requirements first with local records, explicit
+  workflow code, focused evaluations, and deterministic controls. Add services, platforms,
+  orchestration, or additional agents only when measured evidence shows the simpler architecture
+  is insufficient.
+
 ## The demo rule
 
 **A successful demo is not sufficient for completion.**
