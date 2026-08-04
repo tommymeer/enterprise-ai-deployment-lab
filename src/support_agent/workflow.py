@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Callable
+from typing import Callable, TypeVar
 from uuid import uuid4
 
 from .domain import (
@@ -32,6 +32,7 @@ from .execution import (
     OperationStatus,
     generate_idempotency_key,
 )
+from .failures import SyntheticOperationalError
 from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
 
 
@@ -242,6 +243,7 @@ ExecutionAdapter = Callable[[str, Disposition, SupportCase], ExecutionResult]
 HumanReviewer = Callable[
     [SupportCase], tuple[HumanReviewRequest, HumanReviewDecision]
 ]
+ToolResult = TypeVar("ToolResult")
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,9 +367,9 @@ def run_synthetic_support_case(
         step: str,
         tool_name: str,
         arguments: dict[str, object],
-        operation: Callable[[], object],
-        summarize: Callable[[object], dict[str, object]],
-    ) -> object:
+        operation: Callable[[], ToolResult],
+        summarize: Callable[[ToolResult], dict[str, object]],
+    ) -> ToolResult:
         record(
             step,
             "tool_called",
@@ -376,7 +378,26 @@ def run_synthetic_support_case(
             retry_count=0,
         )
         started = elapsed_clock()
-        result = operation()
+        try:
+            result = operation()
+        except SyntheticOperationalError as failure:
+            latency_ms = (elapsed_clock() - started) * 1000
+            record(
+                step,
+                "modeled_operational_failure",
+                tool_name=tool_name,
+                latency_ms=latency_ms,
+                retry_count=0,
+                detail=(
+                    f"injection_id={failure.injection.injection_id}; "
+                    f"target={failure.injection.target.value}; "
+                    f"kind={failure.injection.kind.value}; "
+                    f"call={failure.call_number}; "
+                    f"retryable={str(failure.injection.retryable).lower()}; "
+                    f"detail={failure.injection.detail}"
+                ),
+            )
+            raise
         latency_ms = (elapsed_clock() - started) * 1000
         record(
             step,
@@ -388,6 +409,23 @@ def run_synthetic_support_case(
             retry_count=0,
         )
         return result
+
+    def operational_stop(stage: str, failure: SyntheticOperationalError) -> WorkflowResult:
+        record(
+            "workflow",
+            "workflow_stopped",
+            state_before=case.snapshot(),
+            state_after=case.snapshot(),
+            final_outcome=case.case_status.value,
+            detail=f"safe stop after modeled {failure.injection.kind.value}",
+        )
+        return _result(
+            case,
+            trace,
+            completed=False,
+            failure_stage=stage,
+            failure_reason=failure.injection.detail,
+        )
 
     record("workflow", "workflow_started", state_after=case.snapshot())
     change(
@@ -422,17 +460,20 @@ def run_synthetic_support_case(
     )
     records: list[object] = []
     for stage, name, arguments, operation in lookup_specs:
-        found = tool_call(
-            stage,
-            name,
-            arguments,
-            operation,
-            lambda value: {
-                "record_id": getattr(value, "ref_id", None),
-                "retrieval_status": getattr(value, "retrieval_status").value,
-                "match_status": getattr(value, "match_status").value,
-            },
-        )
+        try:
+            found = tool_call(
+                stage,
+                name,
+                arguments,
+                operation,
+                lambda value: {
+                    "record_id": getattr(value, "ref_id", None),
+                    "retrieval_status": getattr(value, "retrieval_status").value,
+                    "match_status": getattr(value, "match_status").value,
+                },
+            )
+        except SyntheticOperationalError as failure:
+            return operational_stop(stage, failure)
         records.append(found)
         reason = _lookup_failure(found)
         if reason is not None:
@@ -466,16 +507,19 @@ def run_synthetic_support_case(
         ),
     )
 
-    shipment = tool_call(
-        "shipment_lookup",
-        "synthetic_shipment_lookup",
-        {"shipment_id": case_input.shipment_identifier},
-        lambda: configuration.shipment_lookup(case_input.shipment_identifier),
-        lambda value: {
-            "shipment_id": getattr(value, "ref_id"),
-            "retrieval_status": getattr(value, "retrieval_status").value,
-        },
-    )
+    try:
+        shipment = tool_call(
+            "shipment_lookup",
+            "synthetic_shipment_lookup",
+            {"shipment_id": case_input.shipment_identifier},
+            lambda: configuration.shipment_lookup(case_input.shipment_identifier),
+            lambda value: {
+                "shipment_id": value.ref_id,
+                "retrieval_status": value.retrieval_status.value,
+            },
+        )
+    except SyntheticOperationalError as failure:
+        return operational_stop("shipment_lookup", failure)
     change(
         "shipment",
         "shipment_attached",
@@ -491,19 +535,22 @@ def run_synthetic_support_case(
         ),
     )
 
-    evidence = tool_call(
-        "carrier_evidence_lookup",
-        "synthetic_carrier_evidence_lookup",
-        {"shipment_id": shipment.ref_id},  # type: ignore[union-attr]
-        lambda: configuration.carrier_evidence_lookup(shipment),  # type: ignore[arg-type]
-        lambda value: {
-            "evidence_present": value is not None,
-            "snapshot_id": getattr(value, "snapshot_id", None),
-            "retrieval_status": (
-                getattr(value, "retrieval_status").value if value is not None else None
-            ),
-        },
-    )
+    try:
+        evidence = tool_call(
+            "carrier_evidence_lookup",
+            "synthetic_carrier_evidence_lookup",
+            {"shipment_id": shipment.ref_id},
+            lambda: configuration.carrier_evidence_lookup(shipment),
+            lambda value: {
+                "evidence_present": value is not None,
+                "snapshot_id": getattr(value, "snapshot_id", None),
+                "retrieval_status": (
+                    value.retrieval_status.value if value is not None else None
+                ),
+            },
+        )
+    except SyntheticOperationalError as failure:
+        return operational_stop("carrier_evidence_lookup", failure)
     if evidence is not None:
         change(
             "carrier_evidence",
@@ -523,13 +570,16 @@ def run_synthetic_support_case(
             state_after=case.snapshot(),
             detail="lookup returned no evidence",
         )
-    address_result = tool_call(
-        "address_comparison",
-        "synthetic_address_comparison",
-        {"case_id": case.case_id, "order_id": order.ref_id},  # type: ignore[union-attr]
-        lambda: configuration.address_comparison(case_input, order),  # type: ignore[arg-type]
-        lambda value: {"match_result": value.value},
-    )
+    try:
+        address_result = tool_call(
+            "address_comparison",
+            "synthetic_address_comparison",
+            {"case_id": case.case_id, "order_id": order.ref_id},  # type: ignore[union-attr]
+            lambda: configuration.address_comparison(case_input, order),  # type: ignore[arg-type]
+            lambda value: {"match_result": value.value},
+        )
+    except SyntheticOperationalError as failure:
+        return operational_stop("address_comparison", failure)
     change(
         "address_comparison",
         "address_comparison_recorded",
@@ -582,16 +632,20 @@ def run_synthetic_support_case(
                 failure_stage="human_review",
                 failure_reason="human reviewer is not configured",
             )
-        request, decision = tool_call(
-            "human_review",
-            "synthetic_human_reviewer",
-            {"case_id": case.case_id},
-            lambda: configuration.human_reviewer(case),  # type: ignore[misc]
-            lambda value: {
-                "review_id": value[0].review_id,
-                "disposition": value[1].disposition.value,
-            },
-        )  # type: ignore[misc]
+        try:
+            review_result = tool_call(
+                "human_review",
+                "synthetic_human_reviewer",
+                {"case_id": case.case_id},
+                lambda: configuration.human_reviewer(case),  # type: ignore[misc]
+                lambda value: {
+                    "review_id": value[0].review_id,
+                    "disposition": value[1].disposition.value,
+                },
+            )
+        except SyntheticOperationalError as failure:
+            return operational_stop("human_review", failure)
+        request, decision = review_result
         change(
             "human_review",
             "human_review_opened",
@@ -670,20 +724,66 @@ def run_synthetic_support_case(
         if was_retry:
             record("execution", "later_retry_attempted", **operation_trace)
         record("execution", "execution_adapter_invoked", **operation_trace)
-        execution = tool_call(
-            "execution",
-            "synthetic_execution_adapter",
-            {
-                "case_id": case.case_id,
-                "disposition": case.disposition.value,
-                "idempotency_key": idempotency_key,
-            },
-            lambda: configuration.execution(idempotency_key, case.disposition, case),
-            lambda value: {
-                "succeeded": value.succeeded,
-                "detail_present": bool(value.detail),
-            },
-        )
+        try:
+            execution = tool_call(
+                "execution",
+                "synthetic_execution_adapter",
+                {
+                    "case_id": case.case_id,
+                    "disposition": case.disposition.value,
+                    "idempotency_key": idempotency_key,
+                },
+                lambda: configuration.execution(
+                    idempotency_key, case.disposition, case
+                ),
+                lambda value: {
+                    "succeeded": value.succeeded,
+                    "detail_present": bool(value.detail),
+                },
+            )
+        except SyntheticOperationalError as failure:
+            # The adapter was entered but did not report success. Locally we record a
+            # failed attempt and use the existing execution-failure review route;
+            # abandoned-operation recovery is deliberately outside this increment.
+            operation = configuration.execution_registry.record_failure(
+                idempotency_key, failure.injection.detail
+            )
+            operation_trace = {
+                "operation_id": operation.operation_id,
+                "idempotency_key": operation.idempotency_key,
+                "attempt_count": operation.attempt_count,
+                "operation_status": operation.status.value,
+            }
+            record("execution", "failed_operation_recorded", **operation_trace)
+            change(
+                "execution",
+                "execution_result_recorded",
+                lambda: case.record_execution_status(
+                    ExecutionStatus.FAILED,
+                    actor="synthetic-execution",
+                    detail=failure.injection.detail,
+                ),
+                final_outcome=ExecutionStatus.FAILED.value,
+                **operation_trace,
+            )
+            change(
+                "execution",
+                "execution_failure_routed",
+                lambda: case.route_execution_failure_to_review(
+                    actor="synthetic-execution", detail=failure.injection.detail
+                ),
+                escalation=True,
+            )
+            record(
+                "workflow", "workflow_stopped",
+                final_outcome=case.case_status.value,
+                detail="safe stop after modeled execution failure",
+            )
+            return _result(
+                case, trace, completed=False, failure_stage="execution",
+                failure_reason=failure.injection.detail,
+                execution_operation=operation,
+            )
         operation = (
             configuration.execution_registry.record_success(
                 idempotency_key, execution.detail

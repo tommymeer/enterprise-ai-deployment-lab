@@ -58,6 +58,19 @@ from .scenarios import (
     get_support_case_scenarios,
     run_support_case_scenario,
 )
+from .failures import (
+    FailureInjection,
+    FailureKind,
+    FailureRegressionCase,
+    FailureRegressionEvaluation,
+    FailureRegressionResult,
+    FailureTarget,
+    SyntheticOperationalError,
+    evaluate_failure_regression_case,
+    get_failure_regression_case,
+    get_failure_regression_cases,
+    run_failure_regression_case,
+)
 
 __all__ = [
     "AddressMatchResult",
@@ -111,4 +124,15 @@ __all__ = [
     "get_support_case_scenario",
     "get_support_case_scenarios",
     "run_support_case_scenario",
+    "FailureInjection",
+    "FailureKind",
+    "FailureRegressionCase",
+    "FailureRegressionEvaluation",
+    "FailureRegressionResult",
+    "FailureTarget",
+    "SyntheticOperationalError",
+    "evaluate_failure_regression_case",
+    "get_failure_regression_case",
+    "get_failure_regression_cases",
+    "run_failure_regression_case",
 ]

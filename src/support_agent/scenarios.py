@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Callable
 
 from .domain import (
     AddressMatchResult,
@@ -665,6 +666,7 @@ def run_support_case_scenario(
     scenario: SupportCaseScenario,
     *,
     registry: ExecutionRegistry | None = None,
+    configuration_transform: Callable[[WorkflowConfiguration], WorkflowConfiguration] | None = None,
 ) -> ScenarioRunResult:
     """Configure and run one scenario through the existing workflow."""
     if not isinstance(scenario, SupportCaseScenario):
@@ -687,6 +689,8 @@ def run_support_case_scenario(
         reviewer,
         registry if registry is not None else ExecutionRegistry(),
     )
+    if configuration_transform is not None:
+        configuration = configuration_transform(configuration)
     return ScenarioRunResult(
         scenario,
         run_synthetic_support_case(
