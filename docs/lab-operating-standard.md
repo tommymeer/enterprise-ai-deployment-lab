@@ -41,6 +41,20 @@ decision log records the key tradeoffs made along the way. Completion does not r
 product, a deployed service, or a large feature set. It requires that the reasoning and evidence
 for each dimension exist and are legible to someone other than the author.
 
+## AI-assisted code quality and human review
+
+AI-generated code is provisional until human review confirms its purpose and necessity; domain and
+data invariants; failure behavior; behavioral test coverage; security, privacy, cost, and dependency
+impact; readability and maintainability; and whether a simpler design would be sufficient.
+
+- Prefer bounded changes over broad rewrites, and inspect diffs before committing.
+- Passing tests are necessary but not sufficient. Tests should verify intended behavior rather than
+  merely mirror the implementation.
+- Avoid unnecessary dependencies, frameworks, compatibility shims, and speculative abstractions.
+  Every abstraction should be explainable in plain English.
+- Prefer simplification or deletion when complexity is not justified.
+- Do not accept code merely because an agent produced it and the test suite passed.
+
 ## Minimum evidence per stage
 
 These are lightweight evidence standards meant to keep each stage honest, not a formal approval
