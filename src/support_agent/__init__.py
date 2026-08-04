@@ -46,6 +46,18 @@ from .execution import (
     generate_idempotency_key,
 )
 from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
+from .scenarios import (
+    RegressionMetadata,
+    ScenarioCategory,
+    ScenarioEvaluation,
+    ScenarioExpectation,
+    ScenarioRunResult,
+    SupportCaseScenario,
+    evaluate_support_case_scenario,
+    get_support_case_scenario,
+    get_support_case_scenarios,
+    run_support_case_scenario,
+)
 
 __all__ = [
     "AddressMatchResult",
@@ -89,4 +101,14 @@ __all__ = [
     "ExecutionRegistry",
     "OperationStatus",
     "generate_idempotency_key",
+    "RegressionMetadata",
+    "ScenarioCategory",
+    "ScenarioEvaluation",
+    "ScenarioExpectation",
+    "ScenarioRunResult",
+    "SupportCaseScenario",
+    "evaluate_support_case_scenario",
+    "get_support_case_scenario",
+    "get_support_case_scenarios",
+    "run_support_case_scenario",
 ]
