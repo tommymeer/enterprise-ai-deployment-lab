@@ -39,6 +39,7 @@ from .workflow import (
     WorkflowResult,
     run_synthetic_support_case,
 )
+from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
 
 __all__ = [
     "AddressMatchResult",
@@ -76,4 +77,6 @@ __all__ = [
     "WorkflowConfiguration",
     "WorkflowResult",
     "run_synthetic_support_case",
+    "WorkflowTraceCollector",
+    "WorkflowTraceEvent",
 ]
