@@ -387,11 +387,18 @@ def run_failure_regression_case(case: FailureRegressionCase, *, registry: Execut
     }[case.injection.target]
 
     def transform(configuration: WorkflowConfiguration) -> WorkflowConfiguration:
+        from .budgets import RetryPolicy
+
         nonlocal wrapper
         delegate = getattr(configuration, target_field)
         if wrapper is None:
             wrapper = FailureInjectingCallable(delegate, case.injection)
-        return replace(configuration, **{target_field: wrapper})
+        no_retry = RetryPolicy(1, frozenset(), 0.0, 1.0, 0.0)
+        return replace(
+            configuration,
+            retry_policy=no_retry,
+            **{target_field: wrapper},
+        )
 
     shared = registry if registry is not None else ExecutionRegistry()
     scenario = get_support_case_scenario(case.scenario_id)

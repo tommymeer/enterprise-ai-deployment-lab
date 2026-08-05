@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from time import perf_counter
-from typing import Callable, TypeVar
+from typing import Callable, Mapping, TypeVar
 from uuid import uuid4
 
 from .domain import (
@@ -32,7 +33,15 @@ from .execution import (
     OperationStatus,
     generate_idempotency_key,
 )
-from .failures import SyntheticOperationalError
+from .budgets import (
+    BudgetSnapshot,
+    ExecutionBudget,
+    ExecutionBudgetExceeded,
+    RetryExhausted,
+    RetryPolicy,
+    _BudgetTracker,
+)
+from .failures import FailureKind, SyntheticOperationalError
 from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
 
 
@@ -93,6 +102,9 @@ class WorkflowResult:
     trace_id: str = ""
     trace_events: tuple[WorkflowTraceEvent, ...] = ()
     execution_operation: ExecutionOperation | None = None
+    budget_snapshot: BudgetSnapshot = field(
+        default_factory=lambda: BudgetSnapshot(0, 0, 0.0, 0.0, None, False)
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.case, SupportCase):
@@ -138,6 +150,8 @@ class WorkflowResult:
             )
             if self.execution_operation.idempotency_key != expected_key:
                 raise ValueError("execution operation idempotency key must match case")
+        if not isinstance(self.budget_snapshot, BudgetSnapshot):
+            raise ValueError("budget_snapshot must be a BudgetSnapshot")
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +260,27 @@ HumanReviewer = Callable[
 ToolResult = TypeVar("ToolResult")
 
 
+def _no_backoff_sleep(_: float) -> None:
+    """Default deterministic backoff hook; production waiting is out of scope."""
+
+
+DEFAULT_EXECUTION_BUDGET = ExecutionBudget(10, 0, 60_000.0, 0.0)
+DEFAULT_RETRY_POLICY = RetryPolicy(
+    1,
+    frozenset(
+        {
+            FailureKind.TIMEOUT,
+            FailureKind.RATE_LIMIT,
+            FailureKind.SERVICE_UNAVAILABLE,
+            FailureKind.EXECUTION_EXCEPTION,
+        }
+    ),
+    0.0,
+    2.0,
+    0.0,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowConfiguration:
     customer_lookup: CustomerLookup
@@ -259,6 +294,10 @@ class WorkflowConfiguration:
     unresolved_policies: tuple[PolicyPlaceholder, ...] = ()
     human_reviewer: HumanReviewer | None = None
     execution_registry: ExecutionRegistry = field(default_factory=ExecutionRegistry)
+    execution_budget: ExecutionBudget = DEFAULT_EXECUTION_BUDGET
+    retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY
+    backoff_sleep: Callable[[float], None] = _no_backoff_sleep
+    tool_estimated_cost_usd: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -288,6 +327,19 @@ class WorkflowConfiguration:
             raise ValueError("human_reviewer must be callable")
         if not isinstance(self.execution_registry, ExecutionRegistry):
             raise ValueError("execution_registry must be an ExecutionRegistry")
+        if not isinstance(self.execution_budget, ExecutionBudget):
+            raise ValueError("execution_budget must be an ExecutionBudget")
+        if not isinstance(self.retry_policy, RetryPolicy):
+            raise ValueError("retry_policy must be a RetryPolicy")
+        if not callable(self.backoff_sleep):
+            raise ValueError("backoff_sleep must be callable")
+        costs = dict(self.tool_estimated_cost_usd)
+        for tool_name, cost in costs.items():
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError("tool cost names must be non-empty strings")
+            if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:
+                raise ValueError("tool estimated costs must be non-negative")
+        object.__setattr__(self, "tool_estimated_cost_usd", MappingProxyType(costs))
 
 
 def _result(
@@ -298,6 +350,7 @@ def _result(
     failure_stage: str | None = None,
     failure_reason: str | None = None,
     execution_operation: ExecutionOperation | None = None,
+    budget_tracker: _BudgetTracker | None = None,
 ) -> WorkflowResult:
     return WorkflowResult(
         case,
@@ -309,6 +362,11 @@ def _result(
         trace.trace_id,
         trace.events,
         execution_operation,
+        (
+            budget_tracker.snapshot
+            if budget_tracker is not None
+            else BudgetSnapshot(0, 0, 0.0, 0.0, None, False)
+        ),
     )
 
 
@@ -337,6 +395,7 @@ def run_synthetic_support_case(
         trace_id if trace_id is not None else str(uuid4())
     )
     case = SupportCase(case_input.case_id, actor=case_input.actor)
+    budget = _BudgetTracker(configuration.execution_budget)
 
     def record(step: str, event_type: str, **values: object) -> None:
         trace.append(
@@ -369,64 +428,235 @@ def run_synthetic_support_case(
         arguments: dict[str, object],
         operation: Callable[[], ToolResult],
         summarize: Callable[[ToolResult], dict[str, object]],
+        before_attempt: Callable[[int], None] | None = None,
+        after_failure: Callable[[SyntheticOperationalError], None] | None = None,
+        after_result: Callable[[ToolResult], None] | None = None,
     ) -> ToolResult:
-        record(
-            step,
-            "tool_called",
-            tool_name=tool_name,
-            tool_arguments=arguments,
-            retry_count=0,
-        )
-        started = elapsed_clock()
-        try:
-            result = operation()
-        except SyntheticOperationalError as failure:
-            latency_ms = (elapsed_clock() - started) * 1000
+        policy = configuration.retry_policy
+        cost = configuration.tool_estimated_cost_usd.get(tool_name, 0.0)
+        traced_cost = tool_name in configuration.tool_estimated_cost_usd
+        for retry_count in range(policy.max_attempts_per_call):
+            try:
+                budget.start_attempt(
+                    retry=retry_count > 0, estimated_cost_usd=cost
+                )
+            except ExecutionBudgetExceeded as exhausted:
+                record(
+                    step,
+                    "budget_exhausted",
+                    tool_name=tool_name,
+                    retry_count=retry_count,
+                    estimated_cost_usd=(
+                        budget.snapshot.estimated_cost_usd if traced_cost else None
+                    ),
+                    detail=(
+                        f"dimension={exhausted.dimension.value}; "
+                        f"used={exhausted.used}; limit={exhausted.limit}"
+                    ),
+                )
+                raise
+            if retry_count:
+                record(
+                    step,
+                    "retry_attempted",
+                    tool_name=tool_name,
+                    retry_count=retry_count,
+                )
+            if before_attempt is not None:
+                before_attempt(retry_count)
             record(
                 step,
-                "modeled_operational_failure",
+                "tool_called",
                 tool_name=tool_name,
-                latency_ms=latency_ms,
-                retry_count=0,
-                detail=(
-                    f"injection_id={failure.injection.injection_id}; "
-                    f"target={failure.injection.target.value}; "
-                    f"kind={failure.injection.kind.value}; "
-                    f"call={failure.call_number}; "
-                    f"retryable={str(failure.injection.retryable).lower()}; "
-                    f"detail={failure.injection.detail}"
+                tool_arguments=arguments,
+                retry_count=retry_count,
+                estimated_cost_usd=(
+                    budget.snapshot.estimated_cost_usd if traced_cost else None
                 ),
             )
-            raise
-        latency_ms = (elapsed_clock() - started) * 1000
-        record(
-            step,
-            "tool_returned",
-            tool_name=tool_name,
-            tool_arguments=arguments,
-            tool_result=summarize(result),
-            latency_ms=latency_ms,
-            retry_count=0,
-        )
-        return result
+            started = elapsed_clock()
+            try:
+                result = operation()
+            except SyntheticOperationalError as failure:
+                latency_ms = (elapsed_clock() - started) * 1000
+                budget.finish_attempt(elapsed_ms=latency_ms, estimated_cost_usd=cost)
+                record(
+                    step,
+                    "modeled_operational_failure",
+                    tool_name=tool_name,
+                    latency_ms=latency_ms,
+                    retry_count=retry_count,
+                    estimated_cost_usd=(
+                        budget.snapshot.estimated_cost_usd if traced_cost else None
+                    ),
+                    detail=(
+                        f"injection_id={failure.injection.injection_id}; "
+                        f"target={failure.injection.target.value}; "
+                        f"kind={failure.injection.kind.value}; "
+                        f"call={failure.call_number}; "
+                        f"retryable={str(failure.injection.retryable).lower()}; "
+                        f"detail={failure.injection.detail}"
+                    ),
+                )
+                if after_failure is not None:
+                    after_failure(failure)
+                retry_allowed = (
+                    failure.injection.retryable
+                    and failure.injection.kind in policy.retryable_failure_kinds
+                )
+                if not retry_allowed:
+                    raise
+                if retry_count + 1 >= policy.max_attempts_per_call:
+                    record(
+                        step,
+                        "retry_exhausted",
+                        tool_name=tool_name,
+                        retry_count=retry_count,
+                        detail=f"attempts={retry_count + 1}",
+                    )
+                    raise RetryExhausted(retry_count + 1) from failure
+                try:
+                    budget.ensure_attempt_allowed(
+                        retry=True, estimated_cost_usd=cost
+                    )
+                except ExecutionBudgetExceeded as exhausted:
+                    record(
+                        step,
+                        "budget_exhausted",
+                        tool_name=tool_name,
+                        retry_count=retry_count,
+                        detail=(
+                            f"dimension={exhausted.dimension.value}; "
+                            f"used={exhausted.used}; limit={exhausted.limit}"
+                        ),
+                    )
+                    raise
+                delay_ms = policy.backoff_ms(retry_count + 1)
+                try:
+                    budget.ensure_backoff_allowed(delay_ms)
+                except ExecutionBudgetExceeded as exhausted:
+                    record(
+                        step,
+                        "budget_exhausted",
+                        tool_name=tool_name,
+                        retry_count=retry_count,
+                        detail=(
+                            f"dimension={exhausted.dimension.value}; "
+                            f"used={exhausted.used}; limit={exhausted.limit}"
+                        ),
+                    )
+                    raise
+                record(
+                    step,
+                    "retry_scheduled",
+                    tool_name=tool_name,
+                    retry_count=retry_count + 1,
+                    detail=f"backoff_ms={delay_ms}",
+                )
+                budget.record_backoff(delay_ms)
+                configuration.backoff_sleep(delay_ms / 1000.0)
+                record(
+                    step,
+                    "backoff_applied",
+                    tool_name=tool_name,
+                    retry_count=retry_count + 1,
+                    detail=f"backoff_ms={delay_ms}",
+                )
+                try:
+                    budget.ensure_active()
+                except ExecutionBudgetExceeded as exhausted:
+                    record(
+                        step,
+                        "budget_exhausted",
+                        tool_name=tool_name,
+                        retry_count=retry_count,
+                        detail=(
+                            f"dimension={exhausted.dimension.value}; "
+                            f"used={exhausted.used}; limit={exhausted.limit}"
+                        ),
+                    )
+                    raise
+                continue
+            latency_ms = (elapsed_clock() - started) * 1000
+            budget.finish_attempt(elapsed_ms=latency_ms, estimated_cost_usd=cost)
+            record(
+                step,
+                "tool_returned",
+                tool_name=tool_name,
+                tool_arguments=arguments,
+                tool_result=summarize(result),
+                latency_ms=latency_ms,
+                retry_count=retry_count,
+                estimated_cost_usd=(
+                    budget.snapshot.estimated_cost_usd if traced_cost else None
+                ),
+            )
+            if after_result is not None:
+                after_result(result)
+            try:
+                budget.ensure_active()
+            except ExecutionBudgetExceeded as exhausted:
+                record(
+                    step,
+                    "budget_exhausted",
+                    tool_name=tool_name,
+                    retry_count=retry_count,
+                    estimated_cost_usd=(
+                        budget.snapshot.estimated_cost_usd if traced_cost else None
+                    ),
+                    detail=(
+                        f"dimension={exhausted.dimension.value}; "
+                        f"used={exhausted.used}; limit={exhausted.limit}"
+                    ),
+                )
+                raise
+            return result
+        raise AssertionError("bounded retry loop did not return or raise")
 
-    def operational_stop(stage: str, failure: SyntheticOperationalError) -> WorkflowResult:
+    def operational_stop(
+        stage: str,
+        failure: SyntheticOperationalError | ExecutionBudgetExceeded | RetryExhausted,
+        *,
+        execution_operation: ExecutionOperation | None = None,
+    ) -> WorkflowResult:
+        if isinstance(failure, ExecutionBudgetExceeded):
+            failure_stage = f"{stage}_budget"
+            reason = str(failure)
+        elif isinstance(failure, RetryExhausted):
+            failure_stage = f"{stage}_retry"
+            reason = str(failure)
+        else:
+            failure_stage = stage
+            reason = failure.injection.detail
         record(
             "workflow",
             "workflow_stopped",
             state_before=case.snapshot(),
             state_after=case.snapshot(),
             final_outcome=case.case_status.value,
-            detail=f"safe stop after modeled {failure.injection.kind.value}",
+            detail=reason,
         )
         return _result(
             case,
             trace,
             completed=False,
-            failure_stage=stage,
-            failure_reason=failure.injection.detail,
+            failure_stage=failure_stage,
+            failure_reason=reason,
+            execution_operation=execution_operation,
+            budget_tracker=budget,
         )
 
+    configured_budget = configuration.execution_budget
+    record(
+        "workflow",
+        "budget_initialized",
+        detail=(
+            f"tool_calls={configured_budget.max_tool_calls}; "
+            f"retries={configured_budget.max_retry_attempts}; "
+            f"elapsed_ms={configured_budget.max_elapsed_ms}; "
+            f"cost_usd={configured_budget.max_estimated_cost_usd}"
+        ),
+    )
     record("workflow", "workflow_started", state_after=case.snapshot())
     change(
         "customer_report",
@@ -472,7 +702,7 @@ def run_synthetic_support_case(
                     "match_status": getattr(value, "match_status").value,
                 },
             )
-        except SyntheticOperationalError as failure:
+        except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
             return operational_stop(stage, failure)
         records.append(found)
         reason = _lookup_failure(found)
@@ -497,6 +727,7 @@ def run_synthetic_support_case(
                 completed=False,
                 failure_stage=stage,
                 failure_reason=reason,
+                budget_tracker=budget,
             )
     customer, order = records
     change(
@@ -518,7 +749,7 @@ def run_synthetic_support_case(
                 "retrieval_status": value.retrieval_status.value,
             },
         )
-    except SyntheticOperationalError as failure:
+    except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
         return operational_stop("shipment_lookup", failure)
     change(
         "shipment",
@@ -549,7 +780,7 @@ def run_synthetic_support_case(
                 ),
             },
         )
-    except SyntheticOperationalError as failure:
+    except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
         return operational_stop("carrier_evidence_lookup", failure)
     if evidence is not None:
         change(
@@ -578,7 +809,7 @@ def run_synthetic_support_case(
             lambda: configuration.address_comparison(case_input, order),  # type: ignore[arg-type]
             lambda value: {"match_result": value.value},
         )
-    except SyntheticOperationalError as failure:
+    except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
         return operational_stop("address_comparison", failure)
     change(
         "address_comparison",
@@ -615,7 +846,7 @@ def run_synthetic_support_case(
 
     if case.case_status is CaseStatus.AWAITING_CUSTOMER_ACTION:
         record("workflow", "workflow_completed", final_outcome=case.case_status.value)
-        return _result(case, trace)
+        return _result(case, trace, budget_tracker=budget)
     if case.case_status is CaseStatus.HUMAN_REVIEW:
         if configuration.human_reviewer is None:
             record(
@@ -631,6 +862,7 @@ def run_synthetic_support_case(
                 completed=False,
                 failure_stage="human_review",
                 failure_reason="human reviewer is not configured",
+                budget_tracker=budget,
             )
         try:
             review_result = tool_call(
@@ -643,7 +875,7 @@ def run_synthetic_support_case(
                     "disposition": value[1].disposition.value,
                 },
             )
-        except SyntheticOperationalError as failure:
+        except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
             return operational_stop("human_review", failure)
         request, decision = review_result
         change(
@@ -674,7 +906,7 @@ def run_synthetic_support_case(
 
     if case.case_status is not CaseStatus.EXECUTING:
         record("workflow", "workflow_completed", final_outcome=case.case_status.value)
-        return _result(case, trace)
+        return _result(case, trace, budget_tracker=budget)
 
     idempotency_key = generate_idempotency_key(case.case_id, case.disposition)
     operation, created = configuration.execution_registry.get_or_create(
@@ -714,16 +946,63 @@ def run_synthetic_support_case(
         execution = ExecutionResult(True, operation.result_detail or "recorded success")
     else:
         was_retry = operation.status is OperationStatus.FAILED
-        operation = configuration.execution_registry.start_attempt(idempotency_key)
-        operation_trace = {
-            "operation_id": operation.operation_id,
-            "idempotency_key": operation.idempotency_key,
-            "attempt_count": operation.attempt_count,
-            "operation_status": operation.status.value,
-        }
-        if was_retry:
-            record("execution", "later_retry_attempted", **operation_trace)
-        record("execution", "execution_adapter_invoked", **operation_trace)
+
+        def start_execution_attempt(retry_count: int) -> None:
+            nonlocal operation, operation_trace
+            operation = configuration.execution_registry.start_attempt(idempotency_key)
+            operation_trace = {
+                "operation_id": operation.operation_id,
+                "idempotency_key": operation.idempotency_key,
+                "attempt_count": operation.attempt_count,
+                "operation_status": operation.status.value,
+            }
+            if was_retry or retry_count:
+                record("execution", "later_retry_attempted", **operation_trace)
+            record(
+                "execution",
+                "execution_adapter_invoked",
+                retry_count=retry_count,
+                **operation_trace,
+            )
+
+        def fail_execution_attempt(failure: SyntheticOperationalError) -> None:
+            nonlocal operation, operation_trace
+            operation = configuration.execution_registry.record_failure(
+                idempotency_key, failure.injection.detail
+            )
+            operation_trace = {
+                "operation_id": operation.operation_id,
+                "idempotency_key": operation.idempotency_key,
+                "attempt_count": operation.attempt_count,
+                "operation_status": operation.status.value,
+            }
+            record("execution", "failed_operation_recorded", **operation_trace)
+
+        def finish_execution_attempt(result: ExecutionResult) -> None:
+            nonlocal operation, operation_trace
+            operation = (
+                configuration.execution_registry.record_success(
+                    idempotency_key, result.detail
+                )
+                if result.succeeded
+                else configuration.execution_registry.record_failure(
+                    idempotency_key, result.detail
+                )
+            )
+            operation_trace = {
+                "operation_id": operation.operation_id,
+                "idempotency_key": operation.idempotency_key,
+                "attempt_count": operation.attempt_count,
+                "operation_status": operation.status.value,
+            }
+            record(
+                "execution",
+                "successful_operation_recorded"
+                if result.succeeded
+                else "failed_operation_recorded",
+                **operation_trace,
+            )
+
         try:
             execution = tool_call(
                 "execution",
@@ -740,28 +1019,48 @@ def run_synthetic_support_case(
                     "succeeded": value.succeeded,
                     "detail_present": bool(value.detail),
                 },
+                before_attempt=start_execution_attempt,
+                after_failure=fail_execution_attempt,
+                after_result=finish_execution_attempt,
             )
-        except SyntheticOperationalError as failure:
-            # The adapter was entered but did not report success. Locally we record a
-            # failed attempt and use the existing execution-failure review route;
-            # abandoned-operation recovery is deliberately outside this increment.
-            operation = configuration.execution_registry.record_failure(
-                idempotency_key, failure.injection.detail
+        except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
+            if operation.status is OperationStatus.SUCCEEDED:
+                detail = operation.result_detail or "recorded success"
+                change(
+                    "execution",
+                    "execution_result_recorded",
+                    lambda: case.record_execution_status(
+                        ExecutionStatus.SUCCEEDED,
+                        actor="synthetic-execution",
+                        detail=detail,
+                    ),
+                    final_outcome=ExecutionStatus.SUCCEEDED.value,
+                    **operation_trace,
+                )
+                change(
+                    "execution",
+                    "external_follow_up_entered"
+                    if case.disposition is Disposition.OPEN_CARRIER_INQUIRY
+                    else "execution_completed",
+                    lambda: case.complete_execution(
+                        actor="synthetic-execution", detail=detail
+                    ),
+                )
+                return operational_stop(
+                    "execution", failure, execution_operation=operation
+                )
+            detail = (
+                failure.injection.detail
+                if isinstance(failure, SyntheticOperationalError)
+                else str(failure)
             )
-            operation_trace = {
-                "operation_id": operation.operation_id,
-                "idempotency_key": operation.idempotency_key,
-                "attempt_count": operation.attempt_count,
-                "operation_status": operation.status.value,
-            }
-            record("execution", "failed_operation_recorded", **operation_trace)
             change(
                 "execution",
                 "execution_result_recorded",
                 lambda: case.record_execution_status(
                     ExecutionStatus.FAILED,
                     actor="synthetic-execution",
-                    detail=failure.injection.detail,
+                    detail=detail,
                 ),
                 final_outcome=ExecutionStatus.FAILED.value,
                 **operation_trace,
@@ -770,42 +1069,15 @@ def run_synthetic_support_case(
                 "execution",
                 "execution_failure_routed",
                 lambda: case.route_execution_failure_to_review(
-                    actor="synthetic-execution", detail=failure.injection.detail
+                    actor="synthetic-execution", detail=detail
                 ),
                 escalation=True,
             )
-            record(
-                "workflow", "workflow_stopped",
-                final_outcome=case.case_status.value,
-                detail="safe stop after modeled execution failure",
-            )
-            return _result(
-                case, trace, completed=False, failure_stage="execution",
-                failure_reason=failure.injection.detail,
+            return operational_stop(
+                "execution",
+                failure,
                 execution_operation=operation,
             )
-        operation = (
-            configuration.execution_registry.record_success(
-                idempotency_key, execution.detail
-            )
-            if execution.succeeded
-            else configuration.execution_registry.record_failure(
-                idempotency_key, execution.detail
-            )
-        )
-        operation_trace = {
-            "operation_id": operation.operation_id,
-            "idempotency_key": operation.idempotency_key,
-            "attempt_count": operation.attempt_count,
-            "operation_status": operation.status.value,
-        }
-        record(
-            "execution",
-            "successful_operation_recorded"
-            if execution.succeeded
-            else "failed_operation_recorded",
-            **operation_trace,
-        )
     status = (
         ExecutionStatus.SUCCEEDED
         if execution.succeeded
@@ -831,7 +1103,12 @@ def run_synthetic_support_case(
             ),
         )
         record("workflow", "workflow_completed", final_outcome=case.case_status.value)
-        return _result(case, trace, execution_operation=operation)
+        return _result(
+            case,
+            trace,
+            execution_operation=operation,
+            budget_tracker=budget,
+        )
 
     change(
         "execution",
@@ -854,4 +1131,5 @@ def run_synthetic_support_case(
         failure_stage="execution",
         failure_reason=execution.detail,
         execution_operation=operation,
+        budget_tracker=budget,
     )

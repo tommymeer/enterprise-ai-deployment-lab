@@ -46,6 +46,14 @@ from .execution import (
     generate_idempotency_key,
 )
 from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
+from .budgets import (
+    BudgetDimension,
+    BudgetSnapshot,
+    ExecutionBudget,
+    ExecutionBudgetExceeded,
+    RetryExhausted,
+    RetryPolicy,
+)
 from .scenarios import (
     RegressionMetadata,
     ScenarioCategory,
@@ -110,6 +118,12 @@ __all__ = [
     "run_synthetic_support_case",
     "WorkflowTraceCollector",
     "WorkflowTraceEvent",
+    "BudgetDimension",
+    "BudgetSnapshot",
+    "ExecutionBudget",
+    "ExecutionBudgetExceeded",
+    "RetryExhausted",
+    "RetryPolicy",
     "ExecutionOperation",
     "ExecutionRegistry",
     "OperationStatus",
