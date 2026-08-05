@@ -4,6 +4,15 @@
 .env.*
 !.env.example
 
+# Local credentials and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+*service-account*.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
