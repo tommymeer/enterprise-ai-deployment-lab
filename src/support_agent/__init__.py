@@ -79,6 +79,15 @@ from .failures import (
     get_failure_regression_cases,
     run_failure_regression_case,
 )
+from .modeling import ModelClient, ModelRequest, ModelResponse, ScriptedModelClient
+from .extraction import (
+    CustomerMessageExtraction,
+    ExtractionIssueType,
+    ExtractionResult,
+    ExtractionStatus,
+    build_customer_report_extraction_request,
+    extract_customer_message,
+)
 
 __all__ = [
     "AddressMatchResult",
@@ -149,4 +158,14 @@ __all__ = [
     "get_failure_regression_case",
     "get_failure_regression_cases",
     "run_failure_regression_case",
+    "CustomerMessageExtraction",
+    "ExtractionIssueType",
+    "ExtractionResult",
+    "ExtractionStatus",
+    "ModelClient",
+    "ModelRequest",
+    "ModelResponse",
+    "ScriptedModelClient",
+    "build_customer_report_extraction_request",
+    "extract_customer_message",
 ]
