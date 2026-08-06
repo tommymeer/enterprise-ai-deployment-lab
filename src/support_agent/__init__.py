@@ -80,6 +80,7 @@ from .failures import (
     run_failure_regression_case,
 )
 from .modeling import ModelClient, ModelRequest, ModelResponse, ScriptedModelClient
+from .anthropic_adapter import AnthropicConfig, AnthropicModelClient, AnthropicProviderError
 from .extraction import (
     CustomerMessageExtraction,
     ExtractionIssueType,
@@ -166,6 +167,9 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ScriptedModelClient",
+    "AnthropicConfig",
+    "AnthropicModelClient",
+    "AnthropicProviderError",
     "build_customer_report_extraction_request",
     "extract_customer_message",
 ]

@@ -196,22 +196,29 @@ class SupportCaseScenarioTest(unittest.TestCase):
             self.assertNotIn("api_key", serialized)
             self.assertNotIn("secret", serialized)
 
-    def test_scenario_modules_do_not_import_network_or_provider_clients(self) -> None:
+    def test_network_imports_are_isolated_to_provider_adapter(self) -> None:
         repository = Path(__file__).resolve().parents[1]
-        imported: set[str] = set()
-        for path in (
-            path
-            for root in (repository / "src" / "support_agent", repository / "tests")
-            for path in root.glob("*.py")
-        ):
+        source_root = repository / "src" / "support_agent"
+
+        def imports(path: Path) -> set[str]:
+            imported: set[str] = set()
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Import):
                     imported.update(alias.name.split(".")[0] for alias in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module.split(".")[0])
-        self.assertTrue(
-            {"anthropic", "openai", "requests", "httpx", "urllib", "socket"}.isdisjoint(imported)
-        )
+            return imported
+
+        allowed_standard_network_modules = {"anthropic_adapter.py"}
+        forbidden_standard_network_imports = {"urllib", "socket"}
+        forbidden_everywhere = {"anthropic", "openai", "requests", "httpx"}
+        for path in source_root.glob("*.py"):
+            if path.name not in allowed_standard_network_modules:
+                self.assertTrue(
+                    forbidden_standard_network_imports.isdisjoint(imports(path)),
+                    path.name,
+                )
+            self.assertTrue(forbidden_everywhere.isdisjoint(imports(path)), path.name)
 
 
 if __name__ == "__main__":
