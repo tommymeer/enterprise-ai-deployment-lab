@@ -56,6 +56,7 @@ def response_for(message: str, *, request_id: str = "req-secret-123") -> ModelRe
         output_token_count=50,
         latency_ms=12.5,
         request_id=request_id,
+        finish_reason="end_turn",
         synthetic=False,
     )
 
@@ -76,6 +77,80 @@ class FakeClient:
 
 
 class LiveExtractionValidationTests(unittest.TestCase):
+    def test_model_response_preserves_positional_synthetic_argument(self):
+        response = ModelResponse(
+            "test", "model", "{}", None, 0, 0, 0.0, 0.0, "request-1", False
+        )
+
+        self.assertFalse(response.synthetic)
+        self.assertIsNone(response.finish_reason)
+
+    def test_model_response_finish_reason_validation(self):
+        for finish_reason in (None, "end_turn"):
+            with self.subTest(finish_reason=finish_reason):
+                response = ModelResponse(
+                    "test", "model", response_text="{}", finish_reason=finish_reason
+                )
+                self.assertEqual(response.finish_reason, finish_reason)
+        for finish_reason in ("", "  ", 3):
+            with self.subTest(finish_reason=finish_reason), self.assertRaises(ValueError):
+                ModelResponse(  # type: ignore[arg-type]
+                    "test", "model", response_text="{}", finish_reason=finish_reason
+                )
+
+    def test_response_shape_diagnostics(self):
+        cases = (
+            (
+                "  ```json\n{\"safe\":true}\n```  ",
+                {
+                    "response_starts_with_code_fence": True,
+                    "response_ends_with_code_fence": True,
+                    "first_non_whitespace_character": "`",
+                    "response_appears_to_start_with_json_object": False,
+                },
+            ),
+            (
+                " \n{\"safe\":true}",
+                {
+                    "response_starts_with_code_fence": False,
+                    "response_ends_with_code_fence": False,
+                    "first_non_whitespace_character": "{",
+                    "response_appears_to_start_with_json_object": True,
+                },
+            ),
+            (
+                "Preface that must not be emitted {\"safe\":true}",
+                {
+                    "response_starts_with_code_fence": False,
+                    "response_ends_with_code_fence": False,
+                    "first_non_whitespace_character": "P",
+                    "response_appears_to_start_with_json_object": False,
+                },
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                response = ModelResponse(
+                    "test", "model", response_text=text, finish_reason="end_turn"
+                )
+                diagnostics = runner.response_shape_diagnostics(response)
+                self.assertEqual(diagnostics["response_character_count"], len(text))
+                self.assertEqual(diagnostics["finish_reason"], "end_turn")
+                for name, value in expected.items():
+                    self.assertEqual(diagnostics[name], value)
+                self.assertNotIn(text, json.dumps(diagnostics))
+
+    def test_empty_response_shape_diagnostics(self):
+        for text in ("", " \t\n"):
+            with self.subTest(text=repr(text)):
+                diagnostics = runner.response_shape_diagnostics(
+                    ModelResponse("test", "model", response_text=text)
+                )
+                self.assertIsNone(diagnostics["first_non_whitespace_character"])
+                self.assertFalse(diagnostics["response_starts_with_code_fence"])
+                self.assertFalse(diagnostics["response_ends_with_code_fence"])
+                self.assertFalse(diagnostics["response_appears_to_start_with_json_object"])
+
     def test_without_confirmation_prints_plan_and_constructs_no_client(self):
         output = StringIO()
         constructions = []
@@ -172,6 +247,39 @@ class LiveExtractionValidationTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
         self.assertIn('"request_id_present":true', rendered)
         self.assertIn('"order_identifier_extracted":true', rendered)
+        self.assertIn('"finish_reason":"end_turn"', rendered)
+
+    def test_invalid_output_record_contains_only_sanitized_shape(self):
+        raw_response = "Private prose SYNTH-ORDER-99999 req-raw api-key-raw"
+        customer_text = runner.CASES[0].customer_message
+
+        class InvalidClient:
+            def complete(self, request):
+                return ModelResponse(
+                    "anthropic",
+                    runner.MODEL,
+                    response_text=raw_response,
+                    request_id="req-private-output",
+                    finish_reason="max_tokens",
+                    synthetic=False,
+                )
+
+        output = StringIO()
+        self.assertEqual(runner.run_live_validation(InvalidClient(), output), 0)
+        rendered = output.getvalue()
+        self.assertIn('"extraction_status":"invalid_model_output"', rendered)
+        self.assertIn('"first_non_whitespace_character":"P"', rendered)
+        self.assertIn('"finish_reason":"max_tokens"', rendered)
+        for forbidden in (
+            raw_response,
+            "Private prose",
+            customer_text,
+            "SYNTH-ORDER-99999",
+            "req-raw",
+            "req-private-output",
+            "api-key-raw",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_provider_error_stops_calls_without_retry_or_sensitive_metadata(self):
         client = FakeClient(fail_on_call=2)

@@ -2,8 +2,8 @@
 
 **Status: In progress**
 
-**Execution status:** The bounded runner has been implemented and tested offline; live validation
-has not yet been executed.
+**Execution status:** The first bounded live validation was executed; its three provider responses
+were rejected during deterministic JSON parsing and require sanitized shape diagnostics.
 
 ## Purpose
 
@@ -23,6 +23,22 @@ Add one entry per decision, most recent first.
 - **Status:** Proposed / Accepted / Superseded (by which later entry, if applicable).
 
 ---
+
+### 2026-08-06 — Instrument rejected live responses without exposing their content
+
+- **Decision:** Add provider-neutral finish metadata and sanitized response-shape diagnostics,
+  then require separate authorization for one bounded rerun. Do not loosen JSON parsing or repair
+  model output.
+- **Context:** The first live run completed 3/3 provider calls, and all 3/3 responses were
+  deterministically rejected at JSON parsing. The run used 673 input tokens and 673 output tokens,
+  cost an estimated $0.008076, and had approximate per-call latency of 3.75–4.57 seconds. Two
+  responses reached the 256 output-token cap.
+- **Alternatives considered:** Infer the failure from token counts; print response excerpts; strip
+  fences or accept surrounding prose; or immediately rerun with different prompt or token limits.
+- **Reasoning:** Existing evidence does not establish whether responses were fenced, prefaced with
+  prose, or truncated. Shape-only instrumentation can distinguish those possibilities on a
+  separately authorized rerun without recording raw output, customer content, or identifiers.
+- **Status:** Accepted.
 
 ### 2026-08-06 — Bound live extraction validation behind a fixed manual runner
 

@@ -114,6 +114,27 @@ def _write_record(stream: TextIO, record: dict[str, object]) -> None:
     print(json.dumps(record, separators=(",", ":"), sort_keys=True), file=stream)
 
 
+def response_shape_diagnostics(response: ModelResponse) -> dict[str, object]:
+    """Return deterministic shape metadata without retaining response content.
+
+    Whitespace means the characters recognized by ``str.isspace``. The JSON-object signal is
+    intentionally limited to whether the first non-whitespace character is ``{``; it does not
+    parse, unwrap, excerpt, or repair the response.
+    """
+    text = response.response_text or ""
+    left_stripped = text.lstrip()
+    right_stripped = text.rstrip()
+    first_character = left_stripped[0] if left_stripped else None
+    return {
+        "response_character_count": len(text),
+        "response_starts_with_code_fence": left_stripped.startswith("```"),
+        "response_ends_with_code_fence": right_stripped.endswith("```"),
+        "first_non_whitespace_character": first_character,
+        "response_appears_to_start_with_json_object": first_character == "{",
+        "finish_reason": response.finish_reason,
+    }
+
+
 def _case_record(
     case: LiveCase, result: ExtractionResult, response: ModelResponse, call_cost: float
 ) -> dict[str, object]:
@@ -135,6 +156,7 @@ def _case_record(
         "latency_ms": round(response.latency_ms, 3),
         "estimated_call_cost_usd": round(call_cost, 8),
         "request_id_present": response.request_id is not None,
+        **response_shape_diagnostics(response),
     }
 
 

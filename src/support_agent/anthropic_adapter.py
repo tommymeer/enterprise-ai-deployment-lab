@@ -151,7 +151,9 @@ def _malformed(detail: str, request_id: str | None) -> AnthropicProviderError:
     )
 
 
-def _parse_success(body: bytes, request_id: str | None) -> tuple[str | None, str, int, int]:
+def _parse_success(
+    body: bytes, request_id: str | None
+) -> tuple[str | None, str, int, int, str | None]:
     try:
         value = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
@@ -161,6 +163,13 @@ def _parse_success(body: bytes, request_id: str | None) -> tuple[str | None, str
     model = value.get("model")
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise _malformed("provider model must be a non-empty string", request_id)
+    stop_reason = value.get("stop_reason")
+    if stop_reason is not None and (
+        not isinstance(stop_reason, str) or not stop_reason.strip()
+    ):
+        raise _malformed(
+            "provider stop_reason must be a non-empty string or null", request_id
+        )
     content = value.get("content")
     if not isinstance(content, list):
         raise _malformed("provider content must be an array", request_id)
@@ -186,7 +195,7 @@ def _parse_success(body: bytes, request_id: str | None) -> tuple[str | None, str
             raise _malformed(f"provider {name} must be a non-negative integer", request_id)
         counts.append(count)
     # Anthropic emits ordered text blocks; joining without a separator preserves their exact text.
-    return model, "".join(text_parts), counts[0], counts[1]
+    return model, "".join(text_parts), counts[0], counts[1], stop_reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +244,9 @@ class AnthropicModelClient:
         request_id = _header(response_headers, "request-id") or _header(response_headers, "x-request-id")
         if not 200 <= status <= 299:
             raise _http_error(status, response_headers, response_body)
-        model, text, input_tokens, output_tokens = _parse_success(response_body, request_id)
+        model, text, input_tokens, output_tokens, finish_reason = _parse_success(
+            response_body, request_id
+        )
         return ModelResponse(
             provider=_PROVIDER,
             model=model or self.config.model,
@@ -246,5 +257,6 @@ class AnthropicModelClient:
             # Pricing is deliberately omitted in this increment; no speculative catalog is embedded.
             estimated_cost_usd=0.0,
             request_id=request_id,
+            finish_reason=finish_reason,
             synthetic=False,
         )

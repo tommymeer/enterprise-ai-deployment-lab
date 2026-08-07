@@ -47,6 +47,7 @@ class ModelResponse:
     estimated_cost_usd: float = 0.0
     request_id: str | None = None
     synthetic: bool = True
+    finish_reason: str | None = None
 
     def __post_init__(self) -> None:
         _non_empty(self.provider, "provider")
@@ -74,6 +75,8 @@ class ModelResponse:
                 raise ValueError(f"{name} must be non-negative")
         if self.request_id is not None:
             _non_empty(self.request_id, "request_id")
+        if self.finish_reason is not None:
+            _non_empty(self.finish_reason, "finish_reason")
         if type(self.synthetic) is not bool:
             raise ValueError("synthetic must be a bool")
 

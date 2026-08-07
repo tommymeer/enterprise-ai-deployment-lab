@@ -33,6 +33,7 @@ def success_body(**overrides):
         "model": "claude-returned-model",
         "content": [{"type": "text", "text": "result"}],
         "usage": {"input_tokens": 11, "output_tokens": 7},
+        "stop_reason": "end_turn",
     }
     value.update(overrides)
     return json.dumps(value).encode()
@@ -88,7 +89,14 @@ class AnthropicAdapterTests(unittest.TestCase):
         self.assertEqual(response.latency_ms, 125.0)
         self.assertEqual(response.estimated_cost_usd, 0.0)
         self.assertEqual(response.request_id, "req_123")
+        self.assertEqual(response.finish_reason, "end_turn")
         self.assertFalse(response.synthetic)
+
+    def test_null_stop_reason_is_retained_as_none(self):
+        transport = ScriptedTransport((200, {}, success_body(stop_reason=None)))
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-secret"}, clear=True):
+            response = self.client(transport).complete(request())
+        self.assertIsNone(response.finish_reason)
 
     def test_multiple_text_blocks_are_concatenated_without_separator(self):
         body = success_body(content=[
@@ -117,6 +125,18 @@ class AnthropicAdapterTests(unittest.TestCase):
             with self.subTest(body=body), patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-secret"}, clear=True):
                 with self.assertRaises(AnthropicProviderError) as caught:
                     self.client(ScriptedTransport((200, {}, body))).complete(request())
+                self.assertEqual(caught.exception.error_type, "malformed_response")
+                self.assertFalse(caught.exception.retryable)
+
+    def test_wrong_type_or_blank_stop_reason_is_malformed_provider_data(self):
+        for stop_reason in (3, " "):
+            with self.subTest(stop_reason=stop_reason), patch.dict(
+                os.environ, {"ANTHROPIC_API_KEY": "test-secret"}, clear=True
+            ):
+                with self.assertRaises(AnthropicProviderError) as caught:
+                    self.client(
+                        ScriptedTransport((200, {}, success_body(stop_reason=stop_reason)))
+                    ).complete(request())
                 self.assertEqual(caught.exception.error_type, "malformed_response")
                 self.assertFalse(caught.exception.retryable)
 
