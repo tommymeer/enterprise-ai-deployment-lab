@@ -2,9 +2,9 @@
 
 **Status: In progress**
 
-**Execution status:** The latest bounded live validation passed 2/3 cases end to end. Disabling
-adaptive thinking resolved the prior truncation, and the remaining failure is a clarification-
-consistency mismatch addressed offline below; its live effect has not yet been validated.
+**Execution status:** The bounded extraction-validation increment is complete. The latest
+three-case live validation passed all cases end to end with thinking disabled, valid raw JSON, and
+successful strict validation; this evidence is limited to the three synthetic cases.
 
 ## Purpose
 
@@ -24,6 +24,29 @@ Add one entry per decision, most recent first.
 - **Status:** Proposed / Accepted / Superseded (by which later entry, if applicable).
 
 ---
+
+### 2026-08-06 — Close the bounded extraction-validation repair loop
+
+- **Decision:** Accept the explicit unknown-issue prompt clarification as live-validated for the
+  three bounded synthetic cases and close this extraction-validation increment without another
+  live rerun.
+- **Context:** The separately authorized three-case live validation completed all three calls with
+  their intended controlled outcomes. The complete delivered-not-received case returned
+  `complete`; the missing-order-identifier case returned `needs_clarification` with
+  `order_identifier` as its only missing required field; and the ambiguous unknown-issue case
+  returned `complete` with `issue_type: unknown`. All responses ended with `end_turn`, produced raw
+  JSON, and passed strict validation with no validation reason. Thinking-disabled operation avoided
+  the prior truncation. Aggregate usage was 2,533 input tokens and 456 output tokens, estimated
+  cost was $0.014439, and per-call latency was approximately 2.54–3.42 seconds.
+- **Alternatives considered:** Run another live validation now; broaden the case set; or leave the
+  repair loop open despite the bounded cases passing.
+- **Reasoning:** The evidence confirms the intended extraction distinction: missing required data
+  triggers `needs_clarification`, while a present identifier paired with an unsupported or vague
+  issue completes as `issue_type: unknown`. It also confirms that thinking-disabled operation,
+  raw-JSON output, and strict validation worked together for these cases. This result validates
+  only the three synthetic cases and does not establish broad production accuracy, robustness, or
+  generalization. No further live rerun is justified at this checkpoint.
+- **Status:** Accepted.
 
 ### 2026-08-06 — Clarify unknown-issue semantics within the existing extraction contract
 
