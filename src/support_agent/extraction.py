@@ -48,10 +48,17 @@ Angle-bracket strings are instructions/placeholders. Replace them with values gr
 supplied message; do not copy the placeholder text literally.
 
 Never invent identifiers; an identifier must appear literally in the customer message.
+issue_type "unknown" means the supplied message does not clearly describe the supported
+delivered-not-received issue. issue_type "unknown" alone does not require clarification.
 order_identifier is required for a complete extraction. When it is absent, set order_identifier to
 null, include "order_identifier" in missing_required_fields, set needs_clarification to true, and
 provide a nonempty clarification_reason. When clarification is not needed,
 missing_required_fields must be [] and clarification_reason must be null.
+Under this extraction contract, needs_clarification is true only when the required order_identifier
+is missing. When order_identifier is present but the issue is vague or unsupported, set issue_type
+to "unknown", missing_required_fields to [], needs_clarification to false, and clarification_reason
+to null. This component only extracts and classifies the supplied message; it does not decide
+whether a later workflow step should ask the customer for more detail.
 Customer claim fields represent what the customer says, not verified truth.
 Do not decide policy, eligibility, fraud, refund, replacement, or action."""
 

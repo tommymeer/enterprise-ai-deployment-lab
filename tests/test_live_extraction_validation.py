@@ -186,6 +186,7 @@ class LiveExtractionValidationTests(unittest.TestCase):
     def test_normal_three_case_plan_succeeds_offline(self):
         client = FakeClient()
         constructions = []
+        output = StringIO()
 
         def construct_client():
             constructions.append(True)
@@ -194,12 +195,27 @@ class LiveExtractionValidationTests(unittest.TestCase):
         result = runner.main(
             ["--confirm-live-call"],
             client_factory=construct_client,
-            stream=StringIO(),
+            stream=output,
         )
 
         self.assertEqual(result, 0)
         self.assertEqual(constructions, [True])
         self.assertEqual(len(client.requests), 3)
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        complete, missing_order, ambiguous = records[:3]
+        self.assertEqual(complete["extraction_status"], "complete")
+        self.assertEqual(complete["issue_type"], "delivered_not_received")
+        self.assertEqual(complete["missing_required_fields"], [])
+        self.assertIsNone(complete["validation_reason"])
+        self.assertEqual(missing_order["extraction_status"], "needs_clarification")
+        self.assertEqual(missing_order["missing_required_fields"], ["order_identifier"])
+        self.assertIsNone(missing_order["validation_reason"])
+        self.assertEqual(ambiguous["case_id"], "ambiguous_unknown_issue")
+        self.assertEqual(ambiguous["extraction_status"], "complete")
+        self.assertEqual(ambiguous["issue_type"], "unknown")
+        self.assertTrue(ambiguous["order_identifier_extracted"])
+        self.assertEqual(ambiguous["missing_required_fields"], [])
+        self.assertIsNone(ambiguous["validation_reason"])
 
     def test_dry_run_constructs_no_client_and_makes_no_calls(self):
         client = FakeClient()

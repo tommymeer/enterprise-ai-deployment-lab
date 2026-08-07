@@ -2,8 +2,9 @@
 
 **Status: In progress**
 
-**Execution status:** The latest bounded live validation passed 2/3 cases end to end. The approved
-next repair disables adaptive thinking for this extraction task; its effect awaits live validation.
+**Execution status:** The latest bounded live validation passed 2/3 cases end to end. Disabling
+adaptive thinking resolved the prior truncation, and the remaining failure is a clarification-
+consistency mismatch addressed offline below; its live effect has not yet been validated.
 
 ## Purpose
 
@@ -23,6 +24,28 @@ Add one entry per decision, most recent first.
 - **Status:** Proposed / Accepted / Superseded (by which later entry, if applicable).
 
 ---
+
+### 2026-08-06 — Clarify unknown-issue semantics within the existing extraction contract
+
+- **Decision:** Keep prompt v3, the nine-field schema, and deterministic validation unchanged.
+  Explicitly define `issue_type: unknown`, state that unknown alone does not require clarification,
+  and state that this extraction contract uses clarification only when `order_identifier` is
+  missing. Add focused prompt assertions and direct offline assertions for all three bounded cases,
+  including complete extraction of the vague issue with its present order identifier.
+- **Context:** Disabling adaptive thinking resolved the prior `max_tokens` truncation. The next
+  bounded run attempted and completed three calls: one `complete`, one `needs_clarification`, and
+  one `invalid_model_output`. The third response ended with `end_turn`, but combined
+  `issue_type: unknown` and `needs_clarification: true` with empty `missing_required_fields`, which
+  correctly failed clarification consistency. The run used 1,960 input tokens and 485 output
+  tokens, cost an estimated $0.013155, and had per-call latency of approximately 2.25–5.80 seconds.
+- **Alternatives considered:** Broaden clarification semantics, add a clarification category,
+  change the synthetic case, or change its intended outcome.
+- **Reasoning:** Diagnosis showed that the prompt left unknown-issue clarification ambiguous while
+  the existing schema and validator intentionally limit clarification to a missing required order
+  identifier. Prompt clarification plus stronger offline semantic assertions is the smallest repair
+  that makes the model-facing instructions match the existing contract. No claim is made that the
+  live case will pass until another separately authorized bounded run occurs.
+- **Status:** Accepted.
 
 ### 2026-08-06 — Disable adaptive thinking for bounded Sonnet 5 extraction
 

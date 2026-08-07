@@ -122,6 +122,21 @@ class ExtractionTest(unittest.TestCase):
         ):
             self.assertIn(text, instructions)
 
+    def test_prompt_defines_unknown_and_vague_issue_semantics(self) -> None:
+        instructions = build_customer_report_extraction_request(self.message).system_instructions
+        for text in (
+            'issue_type "unknown" means the supplied message does not clearly describe the supported',
+            'issue_type "unknown" alone does not require clarification',
+            "needs_clarification is true only when the required order_identifier",
+            "is missing",
+            "When order_identifier is present but the issue is vague or unsupported",
+            'to "unknown", missing_required_fields to [], needs_clarification to false',
+            "clarification_reason\nto null",
+            "does not decide",
+            "whether a later workflow step should ask the customer for more detail",
+        ):
+            self.assertIn(text, instructions)
+
     def test_prompt_requires_raw_json_without_fences_or_prose(self) -> None:
         instructions = build_customer_report_extraction_request(self.message).system_instructions
         self.assertIn("raw JSON", instructions)
