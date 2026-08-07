@@ -12,7 +12,7 @@ from typing import Any
 from .modeling import ModelClient, ModelRequest, ModelResponse
 
 
-EXTRACTION_PROMPT_VERSION = "customer-report-extraction-v1"
+EXTRACTION_PROMPT_VERSION = "customer-report-extraction-v2"
 EXTRACTION_SCHEMA_NAME = "CustomerMessageExtraction"
 _SUPPORTED_MISSING_FIELDS = frozenset({"order_identifier"})
 _SCHEMA_KEYS = frozenset(
@@ -34,7 +34,9 @@ Keep customer claims distinct from verified facts. These fields describe claims,
 Use null for unknown values. Use only these issue types: delivered_not_received, unknown.
 Report missing required information; order_identifier is required for a complete extraction.
 Do not decide policy, eligibility, refund, replacement, fraud, or any final action.
-Return exactly the expected schema fields as JSON."""
+Return a raw JSON object containing exactly the expected schema fields.
+Do not wrap the JSON in Markdown code fences.
+Do not add introductory or trailing prose."""
 
 
 class ExtractionIssueType(StrEnum):
@@ -136,12 +138,19 @@ def build_customer_report_extraction_request(customer_message: str) -> ModelRequ
 
 def _parse_response(response: ModelResponse) -> Mapping[str, Any]:
     if response.response_text is not None:
-        parsed = json.loads(response.response_text)
+        parsed = json.loads(_normalize_response_text(response.response_text))
     else:
         parsed = response.structured_payload
     if not isinstance(parsed, Mapping):
         raise ValueError("model output must be a JSON object")
     return parsed
+
+
+def _normalize_response_text(response_text: str) -> str:
+    """Unwrap one exact whole-response JSON fence while leaving its contents intact."""
+    trimmed = response_text.strip()
+    match = re.fullmatch(r"```(?:json)?\r?\n([\s\S]*)\r?\n```", trimmed)
+    return match.group(1) if match is not None else trimmed
 
 
 def _to_proposal(value: Mapping[str, Any]) -> _ExtractionProposal:

@@ -58,9 +58,11 @@ class ExtractionTest(unittest.TestCase):
     def test_prompt_is_deterministic_inspectable_and_bounded(self) -> None:
         first = build_customer_report_extraction_request(self.message)
         self.assertEqual(first, build_customer_report_extraction_request(self.message))
-        self.assertEqual(first.prompt_version, "customer-report-extraction-v1")
+        self.assertEqual(first.prompt_version, "customer-report-extraction-v2")
         self.assertEqual(first.customer_message, self.message)
         for text in ("never invent identifiers", "customer claims", "null", "unknown", "refund", "final action"):
+            self.assertIn(text, first.system_instructions)
+        for text in ("raw JSON object", "Do not wrap", "Do not add introductory or trailing prose"):
             self.assertIn(text, first.system_instructions)
 
     def test_scripted_client_receives_exact_request(self) -> None:
@@ -73,6 +75,41 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(result.status, ExtractionStatus.COMPLETE)
         self.assertTrue(result.trace.parsing_succeeded)
         self.assertEqual(result.extraction.order_identifier, "ORD-12345")  # type: ignore[union-attr]
+
+    def test_one_complete_whole_response_fence_is_accepted(self) -> None:
+        encoded = json.dumps(proposal(self.message))
+        for opening in ("```json", "```"):
+            with self.subTest(opening=opening):
+                result, _ = self.run_payload(f" \n{opening}\n{encoded}\n```\t ")
+                self.assertEqual(result.status, ExtractionStatus.COMPLETE)
+                self.assertTrue(result.trace.validation_succeeded)
+
+    def test_incomplete_or_non_whole_response_fences_are_rejected(self) -> None:
+        encoded = json.dumps(proposal(self.message))
+        responses = (
+            f"`json\n{encoded}\n`",
+            f"```json\n{encoded}",
+            f"prose\n```json\n{encoded}\n```",
+            f"```json\n{encoded}\n```\nprose",
+            f"```json\n{encoded}\n```\n```\n{encoded}\n```",
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                result, _ = self.run_payload(response)
+                self.assertEqual(result.status, ExtractionStatus.INVALID_MODEL_OUTPUT)
+                self.assertFalse(result.trace.parsing_succeeded)
+
+    def test_invalid_json_inside_complete_fence_is_rejected(self) -> None:
+        result, _ = self.run_payload("```json\n{broken\n```")
+        self.assertEqual(result.status, ExtractionStatus.INVALID_MODEL_OUTPUT)
+        self.assertFalse(result.trace.parsing_succeeded)
+
+    def test_fenced_hallucinated_identifier_is_rejected_by_normal_validation(self) -> None:
+        encoded = json.dumps(proposal(self.message, order_identifier="ORD-99999"))
+        result, _ = self.run_payload(f"```json\n{encoded}\n```")
+        self.assertEqual(result.status, ExtractionStatus.INVALID_MODEL_OUTPUT)
+        self.assertTrue(result.trace.parsing_succeeded)
+        self.assertFalse(result.trace.validation_succeeded)
 
     def test_structured_mapping_is_also_supported_and_copied(self) -> None:
         payload = proposal(self.message)

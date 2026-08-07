@@ -2,8 +2,9 @@
 
 **Status: In progress**
 
-**Execution status:** The first bounded live validation was executed; its three provider responses
-were rejected during deterministic JSON parsing and require sanitized shape diagnostics.
+**Execution status:** Two bounded live validations were executed. Sanitized diagnostics from the
+second run established one complete-fence failure mode and one output-cap truncation; the bounded
+repair is implemented but has not yet been validated by another live run.
 
 ## Purpose
 
@@ -23,6 +24,28 @@ Add one entry per decision, most recent first.
 - **Status:** Proposed / Accepted / Superseded (by which later entry, if applicable).
 
 ---
+
+### 2026-08-06 — Normalize one complete JSON fence and raise the bounded output cap
+
+- **Decision:** At the provider-neutral extraction parsing boundary, accept raw JSON or exactly one
+  complete whole-response Markdown fence labeled `json` or unlabeled, then apply every existing
+  schema, grounding, clarification, and trust-boundary check unchanged. Raise only the manual live
+  runner's output cap from 256 to 512 tokens; keep three calls, no retries, sequential execution,
+  the 30-second timeout, and the $0.10 spend ceiling.
+- **Context:** The second diagnostic live run completed all three Anthropic calls. All three
+  responses began with a Markdown fence and all were rejected at JSON parsing. The first two ended
+  normally and had closing fences; the third stopped at `max_tokens` after 256 output tokens and
+  lacked a closing fence. The run used 673 input and 558 output tokens (1,231 total), at an
+  estimated total cost of $0.006926.
+- **Alternatives considered:** Accept arbitrary JSON substrings or surrounding prose; repair
+  malformed or truncated JSON; add provider-specific finish-reason behavior; retry automatically;
+  or leave the 256-token cap unchanged.
+- **Reasoning:** Strict whole-response normalization addresses the two completed fenced responses
+  without broadening trust boundaries, while 512 tokens gives the bounded live cases more room to
+  finish. An incomplete fence remains invalid, including a `max_tokens` response, and no retry or
+  extra call is introduced. The evidence does not yet establish that JSON enclosed by the first
+  two fences will pass schema or grounding validation.
+- **Status:** Accepted.
 
 ### 2026-08-06 — Instrument rejected live responses without exposing their content
 

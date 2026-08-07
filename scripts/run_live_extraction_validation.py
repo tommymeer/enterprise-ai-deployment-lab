@@ -27,7 +27,7 @@ from support_agent import (
 
 
 MODEL = "claude-sonnet-5"
-MAX_TOKENS = 256
+MAX_TOKENS = 512
 TIMEOUT_SECONDS = 30
 RETRIES = 0
 MAX_ATTEMPTED_CALLS = 3

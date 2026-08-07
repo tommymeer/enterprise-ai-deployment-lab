@@ -161,6 +161,7 @@ class LiveExtractionValidationTests(unittest.TestCase):
         self.assertEqual(constructions, [])
         plan = json.loads(output.getvalue())
         self.assertEqual(plan["call_count"], 3)
+        self.assertEqual(plan["max_tokens_per_call"], 512)
         self.assertNotIn("customer_message", plan)
 
     def test_inconsistent_case_count_fails_before_client_construction_or_call(self):
@@ -223,8 +224,8 @@ class LiveExtractionValidationTests(unittest.TestCase):
         self.assertIn("SYNTH-ORDER-41003", runner.CASES[2].customer_message)
 
     def test_pricing_arithmetic_and_pre_run_maximum(self):
-        self.assertAlmostEqual(runner.estimated_cost_usd(2_000, 256), 0.00656)
-        self.assertAlmostEqual(runner.PRE_RUN_MAXIMUM_COST_USD, 0.01968)
+        self.assertEqual(runner.MAXIMUM_COST_PER_CALL_USD, 0.00912)
+        self.assertEqual(runner.PRE_RUN_MAXIMUM_COST_USD, 0.02736)
 
     def test_spend_guard_prevents_disallowed_call(self):
         self.assertTrue(runner.spend_guard_allows_call(0.0, 3))
