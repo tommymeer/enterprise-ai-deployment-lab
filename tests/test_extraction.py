@@ -58,12 +58,74 @@ class ExtractionTest(unittest.TestCase):
     def test_prompt_is_deterministic_inspectable_and_bounded(self) -> None:
         first = build_customer_report_extraction_request(self.message)
         self.assertEqual(first, build_customer_report_extraction_request(self.message))
-        self.assertEqual(first.prompt_version, "customer-report-extraction-v2")
+        self.assertEqual(first.prompt_version, "customer-report-extraction-v3")
         self.assertEqual(first.customer_message, self.message)
-        for text in ("never invent identifiers", "customer claims", "null", "unknown", "refund", "final action"):
-            self.assertIn(text, first.system_instructions)
-        for text in ("raw JSON object", "Do not wrap", "Do not add introductory or trailing prose"):
-            self.assertIn(text, first.system_instructions)
+
+    def test_prompt_enumerates_the_exact_schema_contract(self) -> None:
+        instructions = build_customer_report_extraction_request(self.message).system_instructions
+        fields = (
+            "original_message",
+            "issue_type",
+            "order_identifier",
+            "tracking_identifier",
+            "customer_claims_package_missing",
+            "customer_claims_address_correct",
+            "missing_required_fields",
+            "needs_clarification",
+            "clarification_reason",
+        )
+        for field in fields:
+            self.assertIn(field, instructions)
+        for issue_type in ('"delivered_not_received"', '"unknown"'):
+            self.assertIn(issue_type, instructions)
+        self.assertIn("Output all nine keys", instructions)
+        self.assertIn("do not add, remove, rename, or nest fields", instructions)
+
+    def test_prompt_template_has_exact_fields_and_consistent_clarification(self) -> None:
+        instructions = build_customer_report_extraction_request(self.message).system_instructions
+        template_text = instructions.split("Concrete JSON template:\n", 1)[1].split("\n", 1)[0]
+        template = json.loads(template_text)
+        self.assertEqual(
+            set(template),
+            {
+                "original_message",
+                "issue_type",
+                "order_identifier",
+                "tracking_identifier",
+                "customer_claims_package_missing",
+                "customer_claims_address_correct",
+                "missing_required_fields",
+                "needs_clarification",
+                "clarification_reason",
+            },
+        )
+        self.assertIs(template["needs_clarification"], True)
+        self.assertEqual(template["missing_required_fields"], ["order_identifier"])
+        self.assertIsInstance(template["clarification_reason"], str)
+        self.assertTrue(template["clarification_reason"])
+        self.assertIn("<", template["original_message"])
+        self.assertIn("<", template["clarification_reason"])
+        self.assertIn("do not copy the placeholder text literally", instructions)
+
+    def test_prompt_states_clarification_and_grounding_rules(self) -> None:
+        instructions = build_customer_report_extraction_request(self.message).system_instructions
+        for text in (
+            "copied exactly from the supplied customer message",
+            "Never invent identifiers",
+            "must appear literally in the customer message",
+            "order_identifier is required for a complete extraction",
+            'include "order_identifier" in missing_required_fields',
+            "set needs_clarification to true",
+            "provide a nonempty clarification_reason",
+            "missing_required_fields must be []",
+            "clarification_reason must be null",
+        ):
+            self.assertIn(text, instructions)
+
+    def test_prompt_requires_raw_json_without_fences_or_prose(self) -> None:
+        instructions = build_customer_report_extraction_request(self.message).system_instructions
+        self.assertIn("raw JSON", instructions)
+        self.assertIn("Do not use Markdown fences or prose", instructions)
 
     def test_scripted_client_receives_exact_request(self) -> None:
         result, client = self.run_payload(proposal(self.message))

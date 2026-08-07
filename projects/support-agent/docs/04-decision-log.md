@@ -2,9 +2,9 @@
 
 **Status: In progress**
 
-**Execution status:** Two bounded live validations were executed. Sanitized diagnostics from the
-second run established one complete-fence failure mode and one output-cap truncation; the bounded
-repair is implemented but has not yet been validated by another live run.
+**Execution status:** Three bounded live validations were executed. The third run established that
+raw JSON formatting and the 512-token cap were sufficient for all three cases, but the private
+schema contract was not reproduced. The v3 prompt-contract repair awaits live validation.
 
 ## Purpose
 
@@ -24,6 +24,26 @@ Add one entry per decision, most recent first.
 - **Status:** Proposed / Accepted / Superseded (by which later entry, if applicable).
 
 ---
+
+### 2026-08-06 — Enumerate the nine-field extraction contract in prompt v3
+
+- **Decision:** Change the versioned model-facing contract to
+  `customer-report-extraction-v3` and explicitly enumerate all nine required field names, allowed
+  types, identifier-grounding rules, and clarification consistency rules, with one placeholder-only
+  JSON template. Keep deterministic validation unchanged.
+- **Context:** The third bounded live run completed 3/3 Anthropic calls. All three responses were
+  valid raw JSON, ended normally with `end_turn`, and stayed below the 512-token output limit, but
+  3/3 failed exact schema-key validation because required keys were missing and unsupported keys
+  were present. Aggregate usage was 793 input tokens and 456 output tokens, estimated cost was
+  $0.006146, and per-call latency was approximately 1.98–5.10 seconds. The diagnosed cause was that
+  the model-facing prompt named a private schema without enumerating its contract.
+- **Alternatives considered:** Loosen exact schema validation; accept aliases; map unsupported
+  fields; repair JSON; or add retries.
+- **Reasoning:** The approved repair addresses the missing information at the model boundary while
+  preserving exact schema, type, clarification, and literal-grounding enforcement. Offline tests
+  establish only that the v3 contract is present and existing validation behavior is preserved;
+  semantic extraction correctness requires another separately authorized live run.
+- **Status:** Accepted.
 
 ### 2026-08-06 — Normalize one complete JSON fence and raise the bounded output cap
 

@@ -12,7 +12,7 @@ from typing import Any
 from .modeling import ModelClient, ModelRequest, ModelResponse
 
 
-EXTRACTION_PROMPT_VERSION = "customer-report-extraction-v2"
+EXTRACTION_PROMPT_VERSION = "customer-report-extraction-v3"
 EXTRACTION_SCHEMA_NAME = "CustomerMessageExtraction"
 _SUPPORTED_MISSING_FIELDS = frozenset({"order_identifier"})
 _SCHEMA_KEYS = frozenset(
@@ -28,15 +28,32 @@ _SCHEMA_KEYS = frozenset(
         "clarification_reason",
     }
 )
-_SYSTEM_INSTRUCTIONS = """Extract a CustomerMessageExtraction from exactly one customer message.
-Extract only information explicitly supported by the customer message; never invent identifiers.
-Keep customer claims distinct from verified facts. These fields describe claims, not real-world truth.
-Use null for unknown values. Use only these issue types: delivered_not_received, unknown.
-Report missing required information; order_identifier is required for a complete extraction.
-Do not decide policy, eligibility, refund, replacement, fraud, or any final action.
-Return a raw JSON object containing exactly the expected schema fields.
-Do not wrap the JSON in Markdown code fences.
-Do not add introductory or trailing prose."""
+_SYSTEM_INSTRUCTIONS = """Extract exactly one customer message as raw JSON. Output all nine keys below;
+do not add, remove, rename, or nest fields. Do not use Markdown fences or prose.
+
+Required fields and exact allowed types:
+- original_message: string, copied exactly from the supplied customer message
+- issue_type: exactly "delivered_not_received" or "unknown"
+- order_identifier: string or null
+- tracking_identifier: string or null
+- customer_claims_package_missing: boolean or null
+- customer_claims_address_correct: boolean or null
+- missing_required_fields: array containing only "order_identifier", or empty
+- needs_clarification: boolean
+- clarification_reason: nonempty string when clarification is needed, otherwise null
+
+Concrete JSON template:
+{"original_message":"<copy the supplied customer message exactly>","issue_type":"unknown","order_identifier":null,"tracking_identifier":null,"customer_claims_package_missing":null,"customer_claims_address_correct":null,"missing_required_fields":["order_identifier"],"needs_clarification":true,"clarification_reason":"<brief reason the order identifier is required>"}
+Angle-bracket strings are instructions/placeholders. Replace them with values grounded in the
+supplied message; do not copy the placeholder text literally.
+
+Never invent identifiers; an identifier must appear literally in the customer message.
+order_identifier is required for a complete extraction. When it is absent, set order_identifier to
+null, include "order_identifier" in missing_required_fields, set needs_clarification to true, and
+provide a nonempty clarification_reason. When clarification is not needed,
+missing_required_fields must be [] and clarification_reason must be null.
+Customer claim fields represent what the customer says, not verified truth.
+Do not decide policy, eligibility, fraud, refund, replacement, or action."""
 
 
 class ExtractionIssueType(StrEnum):
