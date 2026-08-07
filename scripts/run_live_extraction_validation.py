@@ -33,8 +33,8 @@ RETRIES = 0
 MAX_ATTEMPTED_CALLS = 3
 MAXIMUM_AUTHORIZED_SPEND_USD = 0.10
 MAX_INPUT_TOKENS_PER_CALL = 2_000
-INPUT_USD_PER_MILLION_TOKENS = 2.00
-OUTPUT_USD_PER_MILLION_TOKENS = 10.00
+INPUT_USD_PER_MILLION_TOKENS = 3.00
+OUTPUT_USD_PER_MILLION_TOKENS = 15.00
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,7 +260,9 @@ def main(
 
     factory = client_factory or (
         lambda: AnthropicModelClient(
-            AnthropicConfig(MODEL, MAX_TOKENS, TIMEOUT_SECONDS)
+            AnthropicConfig(
+                MODEL, MAX_TOKENS, TIMEOUT_SECONDS, disable_thinking=True
+            )
         )
     )
     return run_live_validation(factory(), stream)

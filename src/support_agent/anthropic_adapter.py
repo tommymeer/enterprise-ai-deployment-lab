@@ -24,6 +24,7 @@ class AnthropicConfig:
     max_tokens: int
     timeout_seconds: float
     api_version: str = "2023-06-01"
+    disable_thinking: bool = False
 
     def __post_init__(self) -> None:
         for name in ("model", "api_version"):
@@ -34,6 +35,8 @@ class AnthropicConfig:
             raise ValueError("max_tokens must be a positive integer")
         if type(self.timeout_seconds) not in (int, float) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if type(self.disable_thinking) is not bool:
+            raise ValueError("disable_thinking must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +220,8 @@ class AnthropicModelClient:
             "messages": [{"role": "user", "content": request.customer_message}],
             "stream": False,
         }
+        if self.config.disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         headers = {
             "content-type": "application/json",

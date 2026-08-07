@@ -12,7 +12,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 import run_live_extraction_validation as runner  # noqa: E402
 
-from support_agent import AnthropicProviderError, ModelResponse  # noqa: E402
+from support_agent import AnthropicProviderError, ModelRequest, ModelResponse  # noqa: E402
 
 
 def response_for(message: str, *, request_id: str = "req-secret-123") -> ModelResponse:
@@ -224,8 +224,37 @@ class LiveExtractionValidationTests(unittest.TestCase):
         self.assertIn("SYNTH-ORDER-41003", runner.CASES[2].customer_message)
 
     def test_pricing_arithmetic_and_pre_run_maximum(self):
-        self.assertEqual(runner.MAXIMUM_COST_PER_CALL_USD, 0.00912)
-        self.assertEqual(runner.PRE_RUN_MAXIMUM_COST_USD, 0.02736)
+        self.assertEqual(runner.INPUT_USD_PER_MILLION_TOKENS, 3.00)
+        self.assertEqual(runner.OUTPUT_USD_PER_MILLION_TOKENS, 15.00)
+        self.assertEqual(runner.MAXIMUM_COST_PER_CALL_USD, 0.01368)
+        self.assertEqual(runner.PRE_RUN_MAXIMUM_COST_USD, 0.04104)
+
+    def test_default_live_client_disables_thinking_without_changing_plan(self):
+        captured_configs = []
+        client = FakeClient()
+
+        def construct(config):
+            captured_configs.append(config)
+            return client
+
+        with patch.object(runner, "AnthropicModelClient", side_effect=construct):
+            result = runner.main(["--confirm-live-call"], stream=StringIO())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(client.requests), 3)
+        config = captured_configs[0]
+        self.assertTrue(config.disable_thinking)
+        self.assertEqual(config.model, "claude-sonnet-5")
+        self.assertEqual(config.max_tokens, 512)
+        self.assertEqual(config.timeout_seconds, 30)
+        self.assertEqual(runner.RETRIES, 0)
+        self.assertEqual(runner.MAX_ATTEMPTED_CALLS, 3)
+        self.assertEqual(runner.MAX_INPUT_TOKENS_PER_CALL, 2_000)
+        self.assertEqual(runner.MAXIMUM_AUTHORIZED_SPEND_USD, 0.10)
+
+    def test_thinking_does_not_leak_into_neutral_request_contract(self):
+        self.assertNotIn("thinking", ModelRequest.__dataclass_fields__)
+        self.assertNotIn("disable_thinking", ModelRequest.__dataclass_fields__)
 
     def test_spend_guard_prevents_disallowed_call(self):
         self.assertTrue(runner.spend_guard_allows_call(0.0, 3))

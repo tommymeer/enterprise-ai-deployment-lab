@@ -77,6 +77,27 @@ class AnthropicAdapterTests(unittest.TestCase):
             },
         )
 
+    def test_thinking_is_unspecified_by_default_and_can_be_disabled(self):
+        self.assertFalse(self.config().disable_thinking)
+        for disabled, expected in (
+            (False, None),
+            (True, {"type": "disabled"}),
+        ):
+            with self.subTest(disabled=disabled):
+                transport = ScriptedTransport((200, {}, success_body()))
+                config = AnthropicConfig(
+                    "claude-configured-model", 128, 2.5, disable_thinking=disabled
+                )
+                with patch.dict(
+                    os.environ, {"ANTHROPIC_API_KEY": "test-secret"}, clear=True
+                ):
+                    AnthropicModelClient(config, transport).complete(request())
+                payload = json.loads(transport.calls[0][1]["body"])
+                if expected is None:
+                    self.assertNotIn("thinking", payload)
+                else:
+                    self.assertEqual(payload["thinking"], expected)
+
     def test_success_becomes_neutral_response_with_measured_latency(self):
         transport = ScriptedTransport((200, {"Request-ID": "req_123"}, success_body()))
         times = iter((10.0, 10.125))
@@ -223,6 +244,11 @@ class AnthropicAdapterTests(unittest.TestCase):
             values = {"model": "m", "max_tokens": 1, "timeout_seconds": 1.0} | kwargs
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 AnthropicConfig(**values)
+        for value in (0, 1, None, "false"):
+            with self.subTest(disable_thinking=value), self.assertRaisesRegex(
+                ValueError, "disable_thinking must be a bool"
+            ):
+                AnthropicConfig("m", 1, 1.0, disable_thinking=value)
 
     def test_endpoint_cannot_be_configured(self):
         with self.assertRaisesRegex(TypeError, "endpoint"):

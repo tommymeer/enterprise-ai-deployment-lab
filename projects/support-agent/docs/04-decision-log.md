@@ -2,9 +2,8 @@
 
 **Status: In progress**
 
-**Execution status:** Three bounded live validations were executed. The third run established that
-raw JSON formatting and the 512-token cap were sufficient for all three cases, but the private
-schema contract was not reproduced. The v3 prompt-contract repair awaits live validation.
+**Execution status:** The latest bounded live validation passed 2/3 cases end to end. The approved
+next repair disables adaptive thinking for this extraction task; its effect awaits live validation.
 
 ## Purpose
 
@@ -24,6 +23,26 @@ Add one entry per decision, most recent first.
 - **Status:** Proposed / Accepted / Superseded (by which later entry, if applicable).
 
 ---
+
+### 2026-08-06 — Disable adaptive thinking for bounded Sonnet 5 extraction
+
+- **Decision:** Configure only the isolated Anthropic adapter to support an immutable, validated
+  `disable_thinking` option, defaulting to false, and enable it in the three-case extraction
+  runner. Correct the runner-local Sonnet 5 pricing assumptions from $2/$10 to $3/$15 per million
+  input/output tokens.
+- **Context:** The latest three-call run passed 2/3 cases end to end. The complete and clarification
+  routes succeeded with `end_turn`; the ambiguous route ended at `max_tokens` after 512 output
+  tokens with truncated visible JSON. Sonnet 5 adaptive thinking was still enabled because the
+  request supplied no thinking field. Aggregate usage was 1,960 input tokens and 923 output tokens,
+  with latency approximately 3.43–5.98 seconds. The previously emitted $0.01315 estimate used the
+  outdated local $2/$10 assumptions; at $3/$15, the corrected run cost is $0.019725.
+- **Alternatives considered:** Increase the token cap; add retries or calls; change the prompt,
+  parser, schema, or validator; or introduce a generic reasoning configuration.
+- **Reasoning:** Explicitly disabling thinking preserves the 512-token visible-output budget for
+  this bounded structured extraction workload while keeping provider settings out of neutral
+  application contracts. Offline evidence does not yet show that disabling thinking resolves the
+  third case, so no improvement claim is made.
+- **Status:** Accepted.
 
 ### 2026-08-06 — Enumerate the nine-field extraction contract in prompt v3
 
