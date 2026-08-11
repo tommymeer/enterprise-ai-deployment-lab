@@ -27,6 +27,8 @@ from .domain import (
 )
 from .workflow import (
     ExecutionResult,
+    IntakeRoute,
+    IntakeRoutingResult,
     SyntheticAddressComparison,
     SyntheticCarrierEvidenceLookup,
     SyntheticCustomerLookup,
@@ -35,9 +37,11 @@ from .workflow import (
     SyntheticOrderLookup,
     SyntheticShipmentLookup,
     SyntheticSupportCaseInput,
+    TrustedIntakeContext,
     WorkflowConfiguration,
     WorkflowResult,
     run_synthetic_support_case,
+    route_customer_message_extraction,
 )
 from .execution import (
     ExecutionOperation,
@@ -115,6 +119,8 @@ __all__ = [
     "TransitionRejected",
     "evaluate_synthetic_structural_policy",
     "ExecutionResult",
+    "IntakeRoute",
+    "IntakeRoutingResult",
     "SyntheticAddressComparison",
     "SyntheticCarrierEvidenceLookup",
     "SyntheticCustomerLookup",
@@ -123,9 +129,11 @@ __all__ = [
     "SyntheticOrderLookup",
     "SyntheticShipmentLookup",
     "SyntheticSupportCaseInput",
+    "TrustedIntakeContext",
     "WorkflowConfiguration",
     "WorkflowResult",
     "run_synthetic_support_case",
+    "route_customer_message_extraction",
     "WorkflowTraceCollector",
     "WorkflowTraceEvent",
     "BudgetDimension",

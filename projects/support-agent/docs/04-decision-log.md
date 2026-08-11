@@ -25,6 +25,31 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-10 — Keep extraction intake routing outside the support-case lifecycle
+
+- **Decision:** Add one deterministic intake router with four outcomes:
+  `manual_intake_review_required`, `clarification_required`,
+  `delivered_not_received_workflow`, and `general_triage_required`. Only a validated `complete`
+  extraction classified as `delivered_not_received` may enter the existing support workflow. The
+  router constructs its workflow input from validated message and order data plus a separate,
+  trusted non-model context.
+- **Context:** The validated extraction component was separate from a deterministic workflow whose
+  input already assumed a supported issue and complete identifiers. A narrow boundary was needed to
+  prevent invalid, incomplete, or unsupported extraction outcomes from reaching evidence, policy,
+  disposition, or execution logic.
+- **Alternatives considered:** Extend `SupportCase` with intake-classification states; reuse
+  `CaseStatus.HUMAN_REVIEW` or `INTAKE_FAILED`; route clarification through the existing
+  `REQUEST_MORE_INFO` disposition; or add a generalized routing framework.
+- **Reasoning:** Pre-workflow manual review, clarification, and general triage are intake outcomes,
+  not states reached after evidence or policy work. Reusing the existing case states would falsely
+  imply that a trusted support case entered that lifecycle. In particular, invalid model output is
+  not `INTAKE_FAILED`, which currently represents deterministic lookup or linkage failure. Keeping
+  the three safe-stop outcomes outside `SupportCase` preserves its state and human-review
+  invariants, while delegation on the one supported route preserves the existing evidence, policy,
+  decision, execution, and follow-up behavior unchanged. Validation for this increment is entirely
+  offline with scripted `ExtractionResult` values; no live integration-validation claim is made.
+- **Status:** Accepted.
+
 ### 2026-08-06 — Close the bounded extraction-validation repair loop
 
 - **Decision:** Accept the explicit unknown-issue prompt clarification as live-validated for the

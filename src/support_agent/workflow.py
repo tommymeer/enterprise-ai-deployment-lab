@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from types import MappingProxyType
 from time import perf_counter
 from typing import Callable, Mapping, TypeVar
@@ -42,6 +43,12 @@ from .budgets import (
     _BudgetTracker,
 )
 from .failures import FailureKind, SyntheticOperationalError
+from .extraction import (
+    CustomerMessageExtraction,
+    ExtractionIssueType,
+    ExtractionResult,
+    ExtractionStatus,
+)
 from .tracing import WorkflowTraceCollector, WorkflowTraceEvent
 
 
@@ -73,6 +80,32 @@ class SyntheticSupportCaseInput:
             "customer_message",
             "customer_identifier",
             "order_identifier",
+            "shipment_identifier",
+            "actor",
+        ):
+            _non_empty(getattr(self, field_name), field_name)
+        _utc(self.received_at, "received_at")
+
+
+class IntakeRoute(StrEnum):
+    MANUAL_INTAKE_REVIEW_REQUIRED = "manual_intake_review_required"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    DELIVERED_NOT_RECEIVED_WORKFLOW = "delivered_not_received_workflow"
+    GENERAL_TRIAGE_REQUIRED = "general_triage_required"
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedIntakeContext:
+    case_id: str
+    customer_identifier: str
+    shipment_identifier: str
+    actor: str
+    received_at: datetime
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "case_id",
+            "customer_identifier",
             "shipment_identifier",
             "actor",
         ):
@@ -152,6 +185,83 @@ class WorkflowResult:
                 raise ValueError("execution operation idempotency key must match case")
         if not isinstance(self.budget_snapshot, BudgetSnapshot):
             raise ValueError("budget_snapshot must be a BudgetSnapshot")
+
+
+@dataclass(frozen=True, slots=True)
+class IntakeRoutingResult:
+    route: IntakeRoute
+    workflow_result: WorkflowResult | None = None
+    reason: str | None = None
+    missing_required_fields: tuple[str, ...] = ()
+    extraction: CustomerMessageExtraction | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.route, IntakeRoute):
+            raise ValueError("route must be an IntakeRoute")
+        object.__setattr__(
+            self, "missing_required_fields", tuple(self.missing_required_fields)
+        )
+        if any(
+            not isinstance(field_name, str) or not field_name.strip()
+            for field_name in self.missing_required_fields
+        ):
+            raise ValueError("missing_required_fields entries must be non-empty strings")
+        if self.extraction is not None and not isinstance(
+            self.extraction, CustomerMessageExtraction
+        ):
+            raise ValueError("extraction must be a CustomerMessageExtraction")
+
+        enters_workflow = (
+            self.route is IntakeRoute.DELIVERED_NOT_RECEIVED_WORKFLOW
+        )
+        if enters_workflow != (self.workflow_result is not None):
+            raise ValueError("only the delivered-not-received route has a workflow result")
+        if enters_workflow:
+            if self.extraction is None or (
+                self.extraction.issue_type
+                is not ExtractionIssueType.DELIVERED_NOT_RECEIVED
+            ):
+                raise ValueError("workflow route requires a delivered-not-received extraction")
+            if (
+                self.extraction.needs_clarification
+                or self.extraction.order_identifier is None
+                or self.extraction.missing_required_fields
+                or self.extraction.clarification_reason is not None
+            ):
+                raise ValueError("workflow route requires a complete extraction")
+            if self.reason is not None or self.missing_required_fields:
+                raise ValueError("workflow route cannot contain stop details")
+        elif self.workflow_result is not None:
+            raise ValueError("non-workflow routes cannot contain a workflow result")
+
+        if self.route is IntakeRoute.MANUAL_INTAKE_REVIEW_REQUIRED:
+            if not isinstance(self.reason, str) or not self.reason.strip():
+                raise ValueError("manual intake review requires a reason")
+            if self.extraction is not None or self.missing_required_fields:
+                raise ValueError("invalid extraction cannot contain validated business data")
+        elif self.route is IntakeRoute.CLARIFICATION_REQUIRED:
+            if self.extraction is None or not self.extraction.needs_clarification:
+                raise ValueError("clarification route requires a clarification extraction")
+            if self.missing_required_fields != self.extraction.missing_required_fields:
+                raise ValueError("clarification fields must match the extraction")
+            if not self.missing_required_fields:
+                raise ValueError("clarification route requires missing fields")
+            if self.reason != self.extraction.clarification_reason:
+                raise ValueError("clarification reason must match the extraction")
+        elif self.route is IntakeRoute.GENERAL_TRIAGE_REQUIRED:
+            if self.extraction is None or (
+                self.extraction.issue_type is not ExtractionIssueType.UNKNOWN
+            ):
+                raise ValueError("general triage requires an unknown-issue extraction")
+            if (
+                self.extraction.needs_clarification
+                or self.extraction.order_identifier is None
+                or self.extraction.missing_required_fields
+                or self.extraction.clarification_reason is not None
+            ):
+                raise ValueError("general triage requires a complete extraction")
+            if self.reason is not None or self.missing_required_fields:
+                raise ValueError("general triage cannot contain clarification details")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1132,4 +1242,70 @@ def run_synthetic_support_case(
         failure_reason=execution.detail,
         execution_operation=operation,
         budget_tracker=budget,
+    )
+
+
+def route_customer_message_extraction(
+    extraction_result: ExtractionResult,
+    trusted_context: TrustedIntakeContext,
+    configuration: WorkflowConfiguration,
+) -> IntakeRoutingResult:
+    """Route validated extraction output without exposing model metadata to policy."""
+    if not isinstance(extraction_result, ExtractionResult):
+        raise TypeError("extraction_result must be an ExtractionResult")
+    if not isinstance(trusted_context, TrustedIntakeContext):
+        raise TypeError("trusted_context must be a TrustedIntakeContext")
+    if not isinstance(configuration, WorkflowConfiguration):
+        raise TypeError("configuration must be a WorkflowConfiguration")
+
+    if extraction_result.status is ExtractionStatus.INVALID_MODEL_OUTPUT:
+        return IntakeRoutingResult(
+            IntakeRoute.MANUAL_INTAKE_REVIEW_REQUIRED,
+            reason=extraction_result.validation_reason,
+        )
+
+    extraction = extraction_result.extraction
+    if extraction is None:
+        raise ValueError("validated extraction status requires an extraction")
+
+    if extraction_result.status is ExtractionStatus.NEEDS_CLARIFICATION:
+        if not extraction.needs_clarification:
+            raise ValueError("clarification status requires clarification business data")
+        return IntakeRoutingResult(
+            IntakeRoute.CLARIFICATION_REQUIRED,
+            reason=extraction.clarification_reason,
+            missing_required_fields=extraction.missing_required_fields,
+            extraction=extraction,
+        )
+
+    if extraction_result.status is not ExtractionStatus.COMPLETE:
+        raise ValueError("unsupported extraction status")
+    if extraction.needs_clarification:
+        raise ValueError("complete status cannot contain clarification business data")
+    if extraction.issue_type is ExtractionIssueType.UNKNOWN:
+        return IntakeRoutingResult(
+            IntakeRoute.GENERAL_TRIAGE_REQUIRED,
+            extraction=extraction,
+        )
+    if extraction.issue_type is not ExtractionIssueType.DELIVERED_NOT_RECEIVED:
+        raise ValueError("complete extraction has an unsupported issue type")
+    if extraction.order_identifier is None:
+        raise ValueError("delivered-not-received workflow requires an order identifier")
+
+    workflow_result = run_synthetic_support_case(
+        SyntheticSupportCaseInput(
+            case_id=trusted_context.case_id,
+            customer_message=extraction.original_message,
+            customer_identifier=trusted_context.customer_identifier,
+            order_identifier=extraction.order_identifier,
+            shipment_identifier=trusted_context.shipment_identifier,
+            actor=trusted_context.actor,
+            received_at=trusted_context.received_at,
+        ),
+        configuration,
+    )
+    return IntakeRoutingResult(
+        IntakeRoute.DELIVERED_NOT_RECEIVED_WORKFLOW,
+        workflow_result=workflow_result,
+        extraction=extraction,
     )
