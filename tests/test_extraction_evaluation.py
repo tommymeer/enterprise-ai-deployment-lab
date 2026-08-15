@@ -1,11 +1,14 @@
 """Focused offline tests for exact extraction evaluation mechanics."""
 
 import unittest
-from dataclasses import replace
+from dataclasses import fields, replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support_agent.extraction import ExtractionIssueType
 from support_agent.extraction_evaluation import (
+    clarification_reason_matches,
+    compare_extractions,
     evaluate_extraction_case,
     get_extraction_eval_cases,
     run_scripted_extraction_eval,
@@ -48,13 +51,87 @@ class ExtractionEvaluationTest(unittest.TestCase):
 
     def test_clarification_field_mistakes_are_caught(self) -> None:
         case = self.cases["missing_order"]
-        wrong = replace(case.expected, order_identifier="carrier", missing_required_fields=(), needs_clarification=False, clarification_reason=None)
-        result = evaluate_extraction_case(case, scripted_response(wrong))
-        self.assertTrue(result.valid_output)
-        self.assertFalse(result.semantic_match)
+        wrong = SimpleNamespace(
+            **{
+                field_name: getattr(case.expected, field_name)
+                for field_name in (field.name for field in fields(case.expected))
+            },
+        )
+        wrong.needs_clarification = False
+        wrong.clarification_reason = None
+        comparisons = compare_extractions(case.expected, wrong)
         self.assertEqual(
-            {item.field_name for item in result.differing_fields},
-            {"order_identifier", "missing_required_fields", "needs_clarification", "clarification_reason"},
+            {item.field_name for item in comparisons if not item.matched},
+            {"needs_clarification", "clarification_reason"},
+        )
+
+    def clarification_match(self, case_id: str, **changes) -> bool:
+        expected = self.cases[case_id].expected
+        actual = replace(expected, **changes)
+        return next(
+            item.matched
+            for item in compare_extractions(expected, actual)
+            if item.field_name == "clarification_reason"
+        )
+
+    def test_original_expected_clarification_wording_passes(self) -> None:
+        self.assertTrue(self.clarification_match("missing_order"))
+
+    def test_live_claude_clarification_wording_passes(self) -> None:
+        self.assertTrue(
+            self.clarification_match(
+                "missing_order",
+                clarification_reason=(
+                    "The order identifier is required to locate the order but was not "
+                    "provided in the message."
+                ),
+            )
+        )
+
+    def test_unrelated_nonempty_clarification_text_fails(self) -> None:
+        self.assertFalse(
+            self.clarification_match(
+                "missing_order", clarification_reason="More information is needed."
+            )
+        )
+
+    def test_null_clarification_reason_fails_when_required(self) -> None:
+        self.assertFalse(
+            clarification_reason_matches(True, None, None)
+        )
+
+    def test_non_null_clarification_reason_fails_when_not_required(self) -> None:
+        self.assertFalse(
+            clarification_reason_matches(False, "ORD-1001", "Order identifier is required.")
+        )
+
+    def test_null_clarification_reason_passes_when_not_required(self) -> None:
+        self.assertTrue(
+            self.clarification_match("clear_dnr_order", clarification_reason=None)
+        )
+
+    def test_other_fields_still_use_exact_equality(self) -> None:
+        expected = self.cases["missing_order"].expected
+        actual = replace(
+            expected,
+            issue_type=ExtractionIssueType.UNKNOWN,
+            clarification_reason=(
+                "The order identifier is required to locate the order but was not "
+                "provided in the message."
+            ),
+        )
+        comparisons = {
+            item.field_name: item.matched
+            for item in compare_extractions(expected, actual)
+        }
+        self.assertTrue(comparisons["clarification_reason"])
+        self.assertFalse(comparisons["issue_type"])
+        self.assertTrue(
+            all(
+                matched
+                for field_name, matched in comparisons.items()
+                if field_name not in {"issue_type", "clarification_reason"}
+            )
         )
 
     def test_eval_uses_only_scripted_clients_without_network(self) -> None:

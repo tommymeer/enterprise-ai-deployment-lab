@@ -25,6 +25,31 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-15 — Grade clarification reasons by the contract's narrow semantics
+
+- **Decision:** Preserve the first ten-case live baseline unchanged, then replace exact sentence
+  equality only for `clarification_reason` with a deterministic contract-level check. When
+  clarification is not needed, the reason must be null. When it is needed because the order
+  identifier is absent, the reason must be a non-empty string that names the order identifier and
+  says it is missing, required, or not provided. Keep exact equality for the other eight fields.
+- **Context:** The untouched first live baseline produced 10/10 valid outputs and 9/10 exact
+  semantic matches under the original exact-field grader. Every structured field was 10/10. The
+  only mismatch was the expected `Order identifier was not provided.` versus the actual `The order
+  identifier is required to locate the order but was not provided in the message.` Total estimated
+  cost was $0.044655, with no provider or validation failures.
+- **Alternatives considered:** Change the extraction prompt or contract; retain exact wording;
+  introduce fuzzy matching, embeddings, an LLM judge, generic semantic similarity, or weighted
+  scoring.
+- **Reasoning:** Both reason strings express the same narrow fact required by the current contract.
+  The mismatch therefore exposed evaluator brittleness rather than an obvious
+  extraction-understanding failure. A tiny explicit rule admits only the evidenced wording
+  variance while keeping the rest of the evaluation exact and inspectable. The first live run
+  exposed a result-retention limitation: stdout was not persisted, so the complete run could not
+  later be re-graded after the rubric changed. The recorded actual reason is covered as a
+  deterministic regression fixture; no additional live call was made. Persisting results is
+  deferred to a later increment.
+- **Status:** Accepted.
+
 ### 2026-08-15 — Evaluate extraction separately with exact field comparisons
 
 - **Decision:** Start extraction evaluation with ten hand-curated synthetic messages, manually

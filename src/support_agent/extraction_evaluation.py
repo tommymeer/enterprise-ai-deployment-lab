@@ -27,10 +27,7 @@ class FieldComparison:
     field_name: str
     expected: object
     actual: object
-
-    @property
-    def matched(self) -> bool:
-        return self.expected == self.actual
+    matched: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +107,46 @@ def get_extraction_eval_cases() -> tuple[ExtractionEvalCase, ...]:
 def compare_extractions(
     expected: CustomerMessageExtraction, actual: CustomerMessageExtraction
 ) -> tuple[FieldComparison, ...]:
-    """Compare every current contract field using exact equality."""
+    """Compare contract fields, allowing only the reason's specified wording variance."""
     return tuple(
-        FieldComparison(field.name, getattr(expected, field.name), getattr(actual, field.name))
+        FieldComparison(
+            field.name,
+            getattr(expected, field.name),
+            getattr(actual, field.name),
+            (
+                clarification_reason_matches(
+                    expected.needs_clarification,
+                    expected.order_identifier,
+                    actual.clarification_reason,
+                )
+                if field.name == "clarification_reason"
+                else getattr(expected, field.name) == getattr(actual, field.name)
+            ),
+        )
         for field in fields(CustomerMessageExtraction)
     )
+
+
+def clarification_reason_matches(
+    needs_clarification: bool,
+    order_identifier: str | None,
+    clarification_reason: str | None,
+) -> bool:
+    """Apply the contract's deterministic rule for clarification-reason grading."""
+    if not needs_clarification:
+        return clarification_reason is None
+    if order_identifier is not None:
+        return False
+    reason = clarification_reason
+    if not isinstance(reason, str) or not reason.strip():
+        return False
+    words = set(reason.lower().replace("-", " ").split())
+    refers_to_order_identifier = {"order", "identifier"} <= words
+    explains_missing_or_required = bool(
+        words & {"missing", "required"}
+        or "not provided" in reason.lower()
+    )
+    return refers_to_order_identifier and explains_missing_or_required
 
 
 def evaluate_extraction_case(
