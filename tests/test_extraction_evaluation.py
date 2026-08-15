@@ -11,6 +11,8 @@ from support_agent.extraction_evaluation import (
     compare_extractions,
     evaluate_extraction_case,
     get_extraction_eval_cases,
+    get_hard_extraction_eval_cases,
+    run_scripted_hard_extraction_eval,
     run_scripted_extraction_eval,
     scripted_response,
 )
@@ -139,6 +141,32 @@ class ExtractionEvaluationTest(unittest.TestCase):
             results = run_scripted_extraction_eval()
         self.assertEqual(len(results), 10)
         self.assertTrue(all(result.extraction_result.trace.synthetic for result in results))
+
+    def test_hard_case_expected_outputs_are_exact_and_offline(self) -> None:
+        with patch("socket.socket", side_effect=AssertionError("network access attempted")):
+            results = run_scripted_hard_extraction_eval()
+        exact_results = results[: len(get_hard_extraction_eval_cases())]
+        self.assertEqual(len(exact_results), 6)
+        self.assertTrue(all(result.valid_output for result in exact_results))
+        self.assertTrue(all(result.semantic_match for result in exact_results))
+        self.assertTrue(all(result.extraction_result.trace.synthetic for result in results))
+
+    def test_hard_case_semantic_mistakes_are_valid_but_caught(self) -> None:
+        results = run_scripted_hard_extraction_eval()[6:]
+        self.assertEqual(len(results), 6)
+        self.assertTrue(all(result.valid_output for result in results))
+        self.assertTrue(all(result.semantic_match is False for result in results))
+        self.assertEqual(
+            [tuple(item.field_name for item in result.differing_fields) for result in results],
+            [
+                ("order_identifier",),
+                ("order_identifier", "tracking_identifier"),
+                ("order_identifier",),
+                ("order_identifier",),
+                ("order_identifier", "missing_required_fields", "needs_clarification", "clarification_reason"),
+                ("customer_claims_address_correct",),
+            ],
+        )
 
 
 if __name__ == "__main__":

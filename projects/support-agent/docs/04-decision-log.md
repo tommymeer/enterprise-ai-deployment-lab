@@ -25,6 +25,25 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-15 — Add representable extraction failure-discovery cases
+
+- **Decision:** Add six offline, manually specified hard cases covering stale quoted order IDs,
+  order/tracking role confusion and punctuation, an explicitly corrected order ID, dense unrelated
+  numbers, identifier words without supplied identifiers, and unsupported address-correctness
+  inference. Exercise each with one exact scripted output and one schema-valid semantic mistake.
+- **Context:** The initial ten cases covered basic classification, missing fields, simple numeric
+  distractors, and address-claim restraint, but not dense role resolution, quotation staleness, or
+  correction within one message. Proposed messages containing unresolved conflicting
+  package-missing claims or unresolved conflicting address-correctness claims were rejected: each
+  contract field is one nullable Boolean and cannot honestly preserve both claims or their order.
+- **Alternatives considered:** Force conflicts to `null`, add conflict fields or conversational
+  semantics, tune the extraction prompt, or make a live provider call.
+- **Reasoning:** Six cases are enough to expose the identified representable blind spots without
+  changing the nine-field contract. The unchanged validator accepts all scripted semantic mistakes,
+  and the existing field grader rejects each on the intended fields. No validator or grader
+  limitation was newly exposed; no prompt tuning, network access, or live model call occurred.
+- **Status:** Accepted.
+
 ### 2026-08-15 — Grade clarification reasons by the contract's narrow semantics
 
 - **Decision:** Preserve the first ten-case live baseline unchanged, then replace exact sentence

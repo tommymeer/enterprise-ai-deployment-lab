@@ -104,6 +104,45 @@ def get_extraction_eval_cases() -> tuple[ExtractionEvalCase, ...]:
     )
 
 
+def get_hard_extraction_eval_cases() -> tuple[ExtractionEvalCase, ...]:
+    """Return manually specified cases for identifier roles and literal claims."""
+    messages = {
+        "stale_quoted_order": (
+            "My current order ORD-2401 shows delivered, but it is not here. "
+            'Previous email: "Order ORD-1399 was delivered last month."'
+        ),
+        "tracking_before_order": (
+            "Tracking **TRK-2402** says delivered; the order is (ORD-2402), "
+            "and I cannot find the package."
+        ),
+        "corrected_order": (
+            "Order ORD-2403—sorry, that is the wrong number. The correct order is "
+            "ORD-2404; it says delivered and is missing."
+        ),
+        "dense_number_roles": (
+            "Customer ID 884211 called on 08/14 about 3 items; phone ending 0199. "
+            "Tracking TRK-2405 belongs to order ORD-2405, which shows delivered, "
+            "but the package is missing."
+        ),
+        "number_prose_without_ids": (
+            "I do not have the order or tracking number. Customer 4821 called on "
+            "August 14 about 3 items; the package shows delivered but is not here."
+        ),
+        "unsupported_address_inference": (
+            "Order ORD-2406 shows delivered to 18 Pine St, but the package is not "
+            "here. I never said whether the address on my order was correct."
+        ),
+    }
+    return (
+        ExtractionEvalCase("stale_quoted_order", messages["stale_quoted_order"], _expected(messages["stale_quoted_order"], order_identifier="ORD-2401")),
+        ExtractionEvalCase("tracking_before_order", messages["tracking_before_order"], _expected(messages["tracking_before_order"], order_identifier="ORD-2402", tracking_identifier="TRK-2402")),
+        ExtractionEvalCase("corrected_order", messages["corrected_order"], _expected(messages["corrected_order"], order_identifier="ORD-2404")),
+        ExtractionEvalCase("dense_number_roles", messages["dense_number_roles"], _expected(messages["dense_number_roles"], order_identifier="ORD-2405", tracking_identifier="TRK-2405")),
+        ExtractionEvalCase("number_prose_without_ids", messages["number_prose_without_ids"], _expected(messages["number_prose_without_ids"], order_identifier=None)),
+        ExtractionEvalCase("unsupported_address_inference", messages["unsupported_address_inference"], _expected(messages["unsupported_address_inference"], order_identifier="ORD-2406")),
+    )
+
+
 def compare_extractions(
     expected: CustomerMessageExtraction, actual: CustomerMessageExtraction
 ) -> tuple[FieldComparison, ...]:
@@ -200,4 +239,28 @@ def run_scripted_extraction_eval() -> tuple[ExtractionEvalResult, ...]:
     bad_payload["order_identifier"] = "ORD-9999"
     invalid = evaluate_extraction_case(case, ModelResponse("synthetic", "scripted-extractor-v1", response_text=json.dumps(bad_payload)))
     attempts.append(replace(invalid, case_id="hallucinated_order"))
+    return tuple(attempts)
+
+
+def run_scripted_hard_extraction_eval() -> tuple[ExtractionEvalResult, ...]:
+    """Run exact hard-case answers and grounded, schema-valid semantic mistakes."""
+    cases = {case.case_id: case for case in get_hard_extraction_eval_cases()}
+    attempts = [
+        evaluate_extraction_case(case, scripted_response(case.expected))
+        for case in cases.values()
+    ]
+    wrong = (
+        ("wrong_stale_quoted_order", "stale_quoted_order", {"order_identifier": "ORD-1399"}),
+        ("wrong_swapped_identifier_roles", "tracking_before_order", {"order_identifier": "TRK-2402", "tracking_identifier": "ORD-2402"}),
+        ("wrong_retracted_order", "corrected_order", {"order_identifier": "ORD-2403"}),
+        ("wrong_customer_as_order", "dense_number_roles", {"order_identifier": "884211"}),
+        ("wrong_number_as_order", "number_prose_without_ids", {"order_identifier": "4821", "missing_required_fields": (), "needs_clarification": False, "clarification_reason": None}),
+        ("wrong_address_inference", "unsupported_address_inference", {"customer_claims_address_correct": True}),
+    )
+    for attempt_id, case_id, changes in wrong:
+        case = cases[case_id]
+        result = evaluate_extraction_case(
+            case, scripted_response(replace(case.expected, **changes))
+        )
+        attempts.append(replace(result, case_id=attempt_id))
     return tuple(attempts)
