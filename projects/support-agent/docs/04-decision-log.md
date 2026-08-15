@@ -25,6 +25,28 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-15 — Establish the untouched live hard-extraction baseline
+
+- **Decision:** Run each of the six frozen hard extraction cases once through the existing Claude
+  production extraction path and current field grader, with no retries or tuning, and retain the
+  raw JSONL locally for later inspection rather than commit it.
+- **Context:** The earlier ten-case live baseline covered the initial extraction set but had not
+  measured the model on the newer cases for stale and corrected identifiers, identifier roles
+  among dense numbers, missing identifiers, and unsupported address inference. The hard-case run
+  produced 6/6 valid outputs, 6/6 semantic matches, and 6/6 matches on all nine fields. All six
+  calls ended with `end_turn`; there were no provider or validation failures. Total usage was
+  5,138 input and 953 output tokens, total provider latency was 11,741.985 ms, and estimated cost
+  was $0.029709.
+- **Alternatives considered:** Rely only on scripted hard-case checks, broaden or tune the cases,
+  rerun failures, or defer raw-result retention.
+- **Reasoning:** This extends the earlier ten-case live baseline with untouched evidence on the
+  frozen hard cases. No genuine model semantic failure has yet been observed in the current
+  bounded extraction task, but sixteen small synthetic cases do not establish production quality
+  or broad robustness. The complete raw result remains locally at
+  `var/live-evals/claude-sonnet-5-hard-extraction-baseline.jsonl`, which is ignored and is not
+  intended to be committed.
+- **Status:** Accepted.
+
 ### 2026-08-15 — Add representable extraction failure-discovery cases
 
 - **Decision:** Add six offline, manually specified hard cases covering stale quoted order IDs,
