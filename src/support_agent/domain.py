@@ -435,6 +435,7 @@ class SupportCase:
         self._customer_report: CustomerReport | None = None
         self._customer_ref: CustomerReference | None = None
         self._order_ref: OrderReference | None = None
+        self._awaiting_order_identifier_correction = False
         self._shipment_refs: list[ShipmentReference] = []
         self._carrier_evidence_snapshots: list[CarrierEvidenceSnapshot] = []
         self._address_match_result = AddressMatchResult.UNKNOWN
@@ -486,6 +487,10 @@ class SupportCase:
     @property
     def order_ref(self) -> OrderReference | None:
         return self._order_ref
+
+    @property
+    def awaiting_order_identifier_correction(self) -> bool:
+        return self._awaiting_order_identifier_correction
 
     @property
     def shipment_refs(self) -> tuple[ShipmentReference, ...]:
@@ -574,6 +579,112 @@ class SupportCase:
         self._order_ref = order_ref
         self._case_status = CaseStatus.LINKED
         self._append_event("state_transition", actor, before, self.snapshot())
+
+    def request_order_identifier_correction(
+        self,
+        customer_ref: CustomerReference,
+        *,
+        actor: str,
+        detail: str,
+    ) -> None:
+        """Preserve valid customer linkage while an unmatched order is corrected."""
+        before = self.snapshot()
+        if self._case_status is not CaseStatus.INTAKE:
+            self._reject(
+                "order identifier correction can only be requested from intake",
+                actor,
+                before,
+            )
+        if (
+            customer_ref.retrieval_status is not RetrievalStatus.SUCCESS
+            or customer_ref.match_status is not MatchStatus.MATCHED
+        ):
+            self._reject(
+                "customer reference must be successfully retrieved and matched",
+                actor,
+                before,
+            )
+        if self._order_ref is not None:
+            self._reject("order must not already be linked", actor, before)
+        self._customer_ref = customer_ref
+        self._awaiting_order_identifier_correction = True
+        self._case_status = CaseStatus.AWAITING_CUSTOMER_ACTION
+        self._append_event(
+            "order_identifier_correction_requested",
+            actor,
+            before,
+            self.snapshot(),
+            detail,
+        )
+
+    def apply_order_identifier_correction(
+        self,
+        corrected_identifier: str,
+        order_ref: OrderReference,
+        *,
+        actor: str,
+    ) -> None:
+        """Record one pre-linkage correction and link only a matched order."""
+        before = self.snapshot()
+        if self._case_status is not CaseStatus.AWAITING_CUSTOMER_ACTION:
+            self._reject(
+                "order identifier correction requires awaiting_customer_action",
+                actor,
+                before,
+            )
+        if not self._awaiting_order_identifier_correction:
+            self._reject(
+                "case is not awaiting an unmatched order identifier correction",
+                actor,
+                before,
+            )
+        if self._order_ref is not None:
+            self._reject("order must not already be linked", actor, before)
+        if (
+            not isinstance(corrected_identifier, str)
+            or not corrected_identifier.strip()
+        ):
+            self._reject("corrected order identifier must not be empty", actor, before)
+        if (
+            self._customer_ref is None
+            or self._customer_ref.retrieval_status is not RetrievalStatus.SUCCESS
+            or self._customer_ref.match_status is not MatchStatus.MATCHED
+        ):
+            self._reject(
+                "matched customer linkage must be preserved before correction",
+                actor,
+                before,
+            )
+        if (
+            order_ref.retrieval_status is RetrievalStatus.SUCCESS
+            and order_ref.match_status is MatchStatus.MATCHED
+            and order_ref.ref_id != corrected_identifier
+        ):
+            self._reject(
+                "matched order identifier must equal the corrected identifier",
+                actor,
+                before,
+            )
+
+        detail = (
+            f"corrected_order_identifier={corrected_identifier}; "
+            f"retrieval_status={order_ref.retrieval_status.value}; "
+            f"match_status={order_ref.match_status.value}"
+        )
+        if (
+            order_ref.retrieval_status is RetrievalStatus.SUCCESS
+            and order_ref.match_status is MatchStatus.MATCHED
+        ):
+            self._order_ref = order_ref
+            self._awaiting_order_identifier_correction = False
+            self._case_status = CaseStatus.LINKED
+        self._append_event(
+            "order_identifier_correction_recorded",
+            actor,
+            before,
+            self.snapshot(),
+            detail,
+        )
 
     def attach_shipment(
         self, shipment_ref: ShipmentReference, *, actor: str

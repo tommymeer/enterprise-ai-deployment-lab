@@ -128,11 +128,21 @@ class WorkflowTraceEvent:
 class WorkflowTraceCollector:
     """Append-only collector whose public event view is an immutable tuple."""
 
-    def __init__(self, trace_id: str) -> None:
+    def __init__(
+        self,
+        trace_id: str,
+        existing_events: tuple[WorkflowTraceEvent, ...] = (),
+    ) -> None:
         if not isinstance(trace_id, str) or not trace_id.strip():
             raise ValueError("trace_id must not be empty")
+        if any(event.trace_id != trace_id for event in existing_events):
+            raise ValueError("existing event trace_id must match collector trace_id")
+        if [event.sequence_number for event in existing_events] != list(
+            range(len(existing_events))
+        ):
+            raise ValueError("existing trace events must be ordered and contiguous")
         self._trace_id = trace_id
-        self._events: list[WorkflowTraceEvent] = []
+        self._events = list(existing_events)
 
     @property
     def trace_id(self) -> str:

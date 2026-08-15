@@ -40,6 +40,7 @@ from .workflow import (
     TrustedIntakeContext,
     WorkflowConfiguration,
     WorkflowResult,
+    correct_unmatched_order_identifier,
     run_synthetic_support_case,
     route_customer_message_extraction,
 )
@@ -132,6 +133,7 @@ __all__ = [
     "TrustedIntakeContext",
     "WorkflowConfiguration",
     "WorkflowResult",
+    "correct_unmatched_order_identifier",
     "run_synthetic_support_case",
     "route_customer_message_extraction",
     "WorkflowTraceCollector",

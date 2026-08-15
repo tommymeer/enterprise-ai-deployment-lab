@@ -567,6 +567,70 @@ class SupportCaseTest(unittest.TestCase):
         self.assertIs(case.customer_ref, customer)
         self.assertIs(case.order_ref, order)
 
+    def test_corrected_order_linkage_is_restricted_to_unmatched_pre_linkage_case(self) -> None:
+        with self.subTest("wrong state"):
+            case = SupportCase("case-wrong-state")
+            with self.assertRaises(TransitionRejected):
+                case.apply_order_identifier_correction(
+                    "order-001", self.matched_order(), actor="agent"
+                )
+
+        with self.subTest("empty identifier"):
+            case = SupportCase("case-empty")
+            case.request_order_identifier_correction(
+                self.matched_customer(), actor="agent", detail="order not found"
+            )
+            with self.assertRaises(TransitionRejected):
+                case.apply_order_identifier_correction(
+                    " ", self.matched_order(), actor="agent"
+                )
+            self.assertEqual(
+                case.case_status, CaseStatus.AWAITING_CUSTOMER_ACTION
+            )
+            self.assertIsNone(case.order_ref)
+
+        with self.subTest("order already linked"):
+            case = SupportCase("case-linked")
+            case.link(self.matched_customer(), self.matched_order(), actor="agent")
+            case.transition_to(CaseStatus.EVIDENCE_GATHERING, actor="agent")
+            case.transition_to(CaseStatus.AWAITING_CUSTOMER_ACTION, actor="agent")
+            with self.assertRaises(TransitionRejected):
+                case.apply_order_identifier_correction(
+                    "order-002", self.matched_order(), actor="agent"
+                )
+            self.assertIsNotNone(case.order_ref)
+
+    def test_corrected_order_identifier_must_match_returned_order(self) -> None:
+        case = SupportCase("case-correction")
+        case.request_order_identifier_correction(
+            self.matched_customer(), actor="agent", detail="order not found"
+        )
+        matched_order = self.matched_order()
+
+        case.apply_order_identifier_correction(
+            "order-001", matched_order, actor="agent"
+        )
+
+        self.assertEqual(case.case_status, CaseStatus.LINKED)
+        self.assertIs(case.order_ref, matched_order)
+
+        mismatched_case = SupportCase("case-mismatched-correction")
+        mismatched_case.request_order_identifier_correction(
+            self.matched_customer(), actor="agent", detail="order not found"
+        )
+        with self.assertRaisesRegex(
+            TransitionRejected,
+            "matched order identifier must equal the corrected identifier",
+        ):
+            mismatched_case.apply_order_identifier_correction(
+                "order-999", self.matched_order(), actor="agent"
+            )
+
+        self.assertEqual(
+            mismatched_case.case_status, CaseStatus.AWAITING_CUSTOMER_ACTION
+        )
+        self.assertIsNone(mismatched_case.order_ref)
+
     def test_failed_order_retrieval_preserves_state(self) -> None:
         case = SupportCase("case-001")
         before = case.snapshot()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -490,21 +490,26 @@ def _lookup_failure(record: object) -> str | None:
     return None
 
 
-def run_synthetic_support_case(
+def _run_synthetic_support_case(
     case_input: SyntheticSupportCaseInput,
     configuration: WorkflowConfiguration,
     *,
     trace_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
     timer: Callable[[], float] | None = None,
+    existing_case: SupportCase | None = None,
+    existing_trace_events: tuple[WorkflowTraceEvent, ...] = (),
+    corrected_order_identifier: str | None = None,
 ) -> WorkflowResult:
     """Run one case, allowing the domain aggregate to enforce every mutation."""
     event_clock = clock or (lambda: datetime.now(UTC))
     elapsed_clock = timer or perf_counter
+    correction_run = existing_case is not None
     trace = WorkflowTraceCollector(
-        trace_id if trace_id is not None else str(uuid4())
+        trace_id if trace_id is not None else str(uuid4()),
+        existing_trace_events,
     )
-    case = SupportCase(case_input.case_id, actor=case_input.actor)
+    case = existing_case or SupportCase(case_input.case_id, actor=case_input.actor)
     budget = _BudgetTracker(configuration.execution_budget)
 
     def record(step: str, event_type: str, **values: object) -> None:
@@ -767,37 +772,55 @@ def run_synthetic_support_case(
             f"cost_usd={configured_budget.max_estimated_cost_usd}"
         ),
     )
-    record("workflow", "workflow_started", state_after=case.snapshot())
-    change(
-        "customer_report",
-        "customer_report_recorded",
-        lambda: case.record_customer_report(
-            CustomerReport(
-                case_input.order_identifier,
-                "synthetic address supplied through configured comparison",
-                case_input.customer_message,
-                "synthetic recipient check not specified",
-                case_input.received_at,
+    record(
+        "workflow",
+        "order_identifier_correction_started" if correction_run else "workflow_started",
+        state_after=case.snapshot(),
+        detail=(
+            f"corrected_order_identifier={corrected_order_identifier}"
+            if correction_run
+            else None
+        ),
+    )
+    if correction_run:
+        lookup_specs = (
+            (
+                "order_lookup",
+                "synthetic_order_lookup",
+                {"order_id": corrected_order_identifier},
+                lambda: configuration.order_lookup(corrected_order_identifier),
             ),
-            actor=case_input.actor,
-        ),
-        detail="customer report stored; message and address omitted from trace",
-    )
-
-    lookup_specs = (
-        (
-            "customer_lookup",
-            "synthetic_customer_lookup",
-            {"customer_id": case_input.customer_identifier},
-            lambda: configuration.customer_lookup(case_input.customer_identifier),
-        ),
-        (
-            "order_lookup",
-            "synthetic_order_lookup",
-            {"order_id": case_input.order_identifier},
-            lambda: configuration.order_lookup(case_input.order_identifier),
-        ),
-    )
+        )
+    else:
+        change(
+            "customer_report",
+            "customer_report_recorded",
+            lambda: case.record_customer_report(
+                CustomerReport(
+                    case_input.order_identifier,
+                    "synthetic address supplied through configured comparison",
+                    case_input.customer_message,
+                    "synthetic recipient check not specified",
+                    case_input.received_at,
+                ),
+                actor=case_input.actor,
+            ),
+            detail="customer report stored; message and address omitted from trace",
+        )
+        lookup_specs = (
+            (
+                "customer_lookup",
+                "synthetic_customer_lookup",
+                {"customer_id": case_input.customer_identifier},
+                lambda: configuration.customer_lookup(case_input.customer_identifier),
+            ),
+            (
+                "order_lookup",
+                "synthetic_order_lookup",
+                {"order_id": case_input.order_identifier},
+                lambda: configuration.order_lookup(case_input.order_identifier),
+            ),
+        )
     records: list[object] = []
     for stage, name, arguments, operation in lookup_specs:
         try:
@@ -816,7 +839,76 @@ def run_synthetic_support_case(
             return operational_stop(stage, failure)
         records.append(found)
         reason = _lookup_failure(found)
+        if correction_run:
+            change(
+                "intake",
+                "order_identifier_correction_recorded",
+                lambda: case.apply_order_identifier_correction(
+                    corrected_order_identifier or "",
+                    found,  # type: ignore[arg-type]
+                    actor=case_input.actor,
+                ),
+                detail=f"corrected_order_identifier={corrected_order_identifier}",
+            )
+            if reason is not None:
+                if (
+                    found.retrieval_status is RetrievalStatus.SUCCESS
+                    and found.match_status is MatchStatus.NOT_FOUND
+                ):
+                    reason = (
+                        "corrected order identifier could not be matched; ask the "
+                        "customer to verify or provide another corrected identifier"
+                    )
+                record(
+                    "workflow",
+                    "workflow_stopped",
+                    final_outcome=case.case_status.value,
+                    detail=reason,
+                )
+                return _result(
+                    case,
+                    trace,
+                    completed=False,
+                    failure_stage=stage,
+                    failure_reason=reason,
+                    budget_tracker=budget,
+                )
+            order = found
+            break
         if reason is not None:
+            if (
+                stage == "order_lookup"
+                and found.retrieval_status is RetrievalStatus.SUCCESS
+                and found.match_status is MatchStatus.NOT_FOUND
+            ):
+                reason = (
+                    "order identifier could not be matched; ask the customer to "
+                    "verify or provide a corrected order identifier"
+                )
+                change(
+                    "intake",
+                    "customer_correction_requested",
+                    lambda: case.request_order_identifier_correction(
+                        records[0],  # type: ignore[arg-type]
+                        actor=case_input.actor,
+                        detail=reason,
+                    ),
+                    detail=reason,
+                )
+                record(
+                    "workflow",
+                    "workflow_stopped",
+                    final_outcome=case.case_status.value,
+                    detail=reason,
+                )
+                return _result(
+                    case,
+                    trace,
+                    completed=False,
+                    failure_stage=stage,
+                    failure_reason=reason,
+                    budget_tracker=budget,
+                )
             change(
                 "intake",
                 "intake_failed",
@@ -839,14 +931,15 @@ def run_synthetic_support_case(
                 failure_reason=reason,
                 budget_tracker=budget,
             )
-    customer, order = records
-    change(
-        "intake",
-        "linkage_completed",
-        lambda: case.link(
-            customer, order, actor=case_input.actor  # type: ignore[arg-type]
-        ),
-    )
+    if not correction_run:
+        customer, order = records
+        change(
+            "intake",
+            "linkage_completed",
+            lambda: case.link(
+                customer, order, actor=case_input.actor  # type: ignore[arg-type]
+            ),
+        )
 
     try:
         shipment = tool_call(
@@ -1242,6 +1335,67 @@ def run_synthetic_support_case(
         failure_reason=execution.detail,
         execution_operation=operation,
         budget_tracker=budget,
+    )
+
+
+def run_synthetic_support_case(
+    case_input: SyntheticSupportCaseInput,
+    configuration: WorkflowConfiguration,
+    *,
+    trace_id: str | None = None,
+    clock: Callable[[], datetime] | None = None,
+    timer: Callable[[], float] | None = None,
+) -> WorkflowResult:
+    """Run a new synthetic support case from intake."""
+    return _run_synthetic_support_case(
+        case_input,
+        configuration,
+        trace_id=trace_id,
+        clock=clock,
+        timer=timer,
+    )
+
+
+def correct_unmatched_order_identifier(
+    stopped_result: WorkflowResult,
+    original_input: SyntheticSupportCaseInput,
+    corrected_order_identifier: str,
+    configuration: WorkflowConfiguration,
+    *,
+    clock: Callable[[], datetime] | None = None,
+    timer: Callable[[], float] | None = None,
+) -> WorkflowResult:
+    """Apply one corrected identifier to an existing pre-linkage stopped case."""
+    if not isinstance(stopped_result, WorkflowResult):
+        raise TypeError("stopped_result must be a WorkflowResult")
+    if stopped_result.case.case_id != original_input.case_id:
+        raise ValueError("original_input case_id must match the stopped case")
+    if stopped_result.completed or stopped_result.failure_stage != "order_lookup":
+        raise ValueError("case must have stopped at order_lookup")
+    if (
+        stopped_result.case.case_status is not CaseStatus.AWAITING_CUSTOMER_ACTION
+        or stopped_result.case.order_ref is not None
+        or not stopped_result.case.awaiting_order_identifier_correction
+    ):
+        raise ValueError("case is not eligible for unmatched order correction")
+    if (
+        not isinstance(corrected_order_identifier, str)
+        or not corrected_order_identifier.strip()
+    ):
+        raise ValueError("corrected_order_identifier must not be empty")
+    corrected_input = replace(
+        original_input,
+        order_identifier=corrected_order_identifier,
+    )
+    return _run_synthetic_support_case(
+        corrected_input,
+        configuration,
+        trace_id=stopped_result.trace_id,
+        clock=clock,
+        timer=timer,
+        existing_case=stopped_result.case,
+        existing_trace_events=stopped_result.trace_events,
+        corrected_order_identifier=corrected_order_identifier,
     )
 
 

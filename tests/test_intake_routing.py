@@ -237,6 +237,53 @@ class IntakeRoutingTest(unittest.TestCase):
             len(direct.case.policy_evaluation_results),
         )
 
+    def test_order_99999_lookup_not_found_requests_customer_correction(self) -> None:
+        message = "My package says delivered but is missing. Order 99999."
+        extraction = replace(
+            self.extraction(),
+            original_message=message,
+            order_identifier="99999",
+        )
+        extraction_result = ExtractionResult(
+            ExtractionStatus.COMPLETE,
+            message,
+            extraction,
+            None,
+            self.trace(),
+        )
+        configuration = replace(
+            self.configuration(),
+            order_lookup=SyntheticOrderLookup(
+                OrderReference(
+                    "99999",
+                    MatchStatus.NOT_FOUND,
+                    None,
+                    None,
+                    None,
+                    self.now,
+                    RetrievalStatus.SUCCESS,
+                )
+            ),
+        )
+
+        routed = route_customer_message_extraction(
+            extraction_result, self.context(), configuration
+        )
+
+        self.assertEqual(routed.route, IntakeRoute.DELIVERED_NOT_RECEIVED_WORKFLOW)
+        workflow = routed.workflow_result
+        self.assertIsNotNone(workflow)
+        self.assertFalse(workflow.completed)  # type: ignore[union-attr]
+        self.assertEqual(
+            workflow.final_case_status,  # type: ignore[union-attr]
+            CaseStatus.AWAITING_CUSTOMER_ACTION,
+        )
+        self.assertEqual(
+            workflow.case.customer_report.order_or_tracking_identifier_provided,  # type: ignore[union-attr]
+            "99999",
+        )
+        self.assertIsNone(workflow.case.order_ref)  # type: ignore[union-attr]
+
     def test_complete_unknown_routes_to_general_triage_without_workflow(self) -> None:
         extraction = self.extraction(issue_type=ExtractionIssueType.UNKNOWN)
         result = ExtractionResult(

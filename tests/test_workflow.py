@@ -30,8 +30,10 @@ from support_agent import (
     SyntheticOrderLookup,
     SyntheticShipmentLookup,
     SyntheticSupportCaseInput,
+    TransitionRejected,
     WorkflowConfiguration,
     WorkflowResult,
+    correct_unmatched_order_identifier,
     generate_idempotency_key,
     run_synthetic_support_case,
 )
@@ -58,7 +60,15 @@ class WorkflowTest(unittest.TestCase):
     ) -> CustomerReference:
         return CustomerReference("customer-001", match, self.now, retrieval)
 
-    def order(self) -> OrderReference:
+    def order(
+        self,
+        retrieval: RetrievalStatus = RetrievalStatus.SUCCESS,
+        match: MatchStatus = MatchStatus.MATCHED,
+    ) -> OrderReference:
+        if retrieval is RetrievalStatus.FAILURE or match is not MatchStatus.MATCHED:
+            return OrderReference(
+                "order-001", match, None, None, None, self.now, retrieval
+            )
         return OrderReference(
             "order-001",
             MatchStatus.MATCHED,
@@ -148,12 +158,13 @@ class WorkflowTest(unittest.TestCase):
         reviewer: SyntheticHumanReviewer | None = None,
         execution: object | None = None,
         customer: CustomerReference | None = None,
+        order: OrderReference | None = None,
         registry: ExecutionRegistry | None = None,
     ) -> WorkflowConfiguration:
         evidence_result = self.evidence() if evidence is ... else evidence
         return WorkflowConfiguration(
             SyntheticCustomerLookup(customer or self.customer()),
-            SyntheticOrderLookup(self.order()),
+            SyntheticOrderLookup(order or self.order()),
             SyntheticShipmentLookup(self.shipment()),
             SyntheticCarrierEvidenceLookup(evidence_result),
             SyntheticAddressComparison(address),
@@ -491,6 +502,203 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.failure_stage, "customer_lookup")
         self.assertEqual(result.case.shipment_refs, ())
         self.assertEqual(result.case.carrier_evidence_snapshots, ())
+
+    def test_order_not_found_requests_customer_correction_without_downstream_work(self) -> None:
+        supplied_identifier = self.case_input().order_identifier
+        result = run_synthetic_support_case(
+            self.case_input(),
+            self.configuration(order=self.order(match=MatchStatus.NOT_FOUND)),
+        )
+
+        self.assertFalse(result.completed)
+        self.assertEqual(
+            result.final_case_status, CaseStatus.AWAITING_CUSTOMER_ACTION
+        )
+        self.assertEqual(result.final_disposition, Disposition.NONE_SELECTED)
+        self.assertEqual(result.failure_stage, "order_lookup")
+        self.assertIn("could not be matched", result.failure_reason or "")
+        self.assertEqual(
+            result.case.customer_report.order_or_tracking_identifier_provided,
+            supplied_identifier,
+        )
+        self.assertIsNone(result.case.order_ref)
+        self.assertEqual(result.case.shipment_refs, ())
+        self.assertEqual(result.case.carrier_evidence_snapshots, ())
+        self.assertEqual(result.case.policy_evaluation_results, ())
+        self.assertEqual(result.case.execution_status, ExecutionStatus.NOT_APPLICABLE)
+        self.assertIsNone(result.case.closed_at)
+        self.assertNotIn(
+            "evidence_gathering_entered",
+            [event.event_type for event in result.trace_events],
+        )
+
+    def test_failed_order_retrieval_remains_intake_failed(self) -> None:
+        result = run_synthetic_support_case(
+            self.case_input(),
+            self.configuration(
+                order=self.order(
+                    RetrievalStatus.FAILURE, MatchStatus.NOT_FOUND
+                )
+            ),
+        )
+
+        self.assertFalse(result.completed)
+        self.assertEqual(result.final_case_status, CaseStatus.INTAKE_FAILED)
+        self.assertEqual(result.failure_stage, "order_lookup")
+        self.assertEqual(result.failure_reason, "retrieval failed")
+
+    def test_order_99999_correction_relinks_and_resumes_existing_workflow(self) -> None:
+        original_input = replace(
+            self.case_input(),
+            customer_message=(
+                "My package says delivered but is missing. Order 99999."
+            ),
+            order_identifier="99999",
+        )
+        stopped = run_synthetic_support_case(
+            original_input,
+            self.configuration(order=self.order(match=MatchStatus.NOT_FOUND)),
+        )
+
+        resumed = correct_unmatched_order_identifier(
+            stopped,
+            original_input,
+            "order-001",
+            self.configuration(),
+        )
+
+        self.assertIs(resumed.case, stopped.case)
+        self.assertTrue(resumed.completed)
+        self.assertEqual(resumed.final_case_status, CaseStatus.CLOSED)
+        self.assertIsNotNone(resumed.case.customer_ref)
+        self.assertIsNotNone(resumed.case.order_ref)
+        audit_transitions = [
+            event.after_state.case_status for event in resumed.case.audit_events
+        ]
+        self.assertIn(CaseStatus.LINKED, audit_transitions)
+        self.assertIn(CaseStatus.EVIDENCE_GATHERING, audit_transitions)
+        self.assertEqual(
+            resumed.case.customer_report.order_or_tracking_identifier_provided,
+            "99999",
+        )
+        self.assertTrue(
+            any(
+                event.tool_arguments.get("order_id") == "99999"
+                for event in resumed.trace_events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.event_type == "order_identifier_correction_recorded"
+                and event.detail == "corrected_order_identifier=order-001"
+                for event in resumed.trace_events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.event_type == "order_identifier_correction_recorded"
+                and "corrected_order_identifier=order-001" in (event.detail or "")
+                for event in resumed.case.audit_events
+            )
+        )
+
+    def test_second_unmatched_order_correction_remains_awaiting_without_policy(self) -> None:
+        original_input = replace(self.case_input(), order_identifier="99999")
+        not_found_configuration = self.configuration(
+            order=self.order(match=MatchStatus.NOT_FOUND)
+        )
+        stopped = run_synthetic_support_case(
+            original_input,
+            not_found_configuration,
+        )
+
+        repeated = correct_unmatched_order_identifier(
+            stopped,
+            original_input,
+            "88888",
+            not_found_configuration,
+        )
+
+        self.assertFalse(repeated.completed)
+        self.assertEqual(
+            repeated.final_case_status, CaseStatus.AWAITING_CUSTOMER_ACTION
+        )
+        self.assertIsNone(repeated.case.order_ref)
+        self.assertEqual(repeated.case.policy_evaluation_results, ())
+        self.assertEqual(repeated.final_disposition, Disposition.NONE_SELECTED)
+        self.assertEqual(repeated.case.execution_status, ExecutionStatus.NOT_APPLICABLE)
+        self.assertNotIn(
+            "evidence_gathering_entered",
+            [event.event_type for event in repeated.trace_events],
+        )
+
+    def test_corrected_order_retrieval_failure_does_not_link_or_progress(self) -> None:
+        original_input = replace(self.case_input(), order_identifier="99999")
+        stopped = run_synthetic_support_case(
+            original_input,
+            self.configuration(order=self.order(match=MatchStatus.NOT_FOUND)),
+        )
+
+        failed = correct_unmatched_order_identifier(
+            stopped,
+            original_input,
+            "order-001",
+            self.configuration(
+                order=self.order(RetrievalStatus.FAILURE, MatchStatus.NOT_FOUND)
+            ),
+        )
+
+        self.assertFalse(failed.completed)
+        self.assertEqual(failed.failure_reason, "retrieval failed")
+        self.assertEqual(
+            failed.final_case_status, CaseStatus.AWAITING_CUSTOMER_ACTION
+        )
+        self.assertIsNone(failed.case.order_ref)
+        self.assertEqual(failed.case.policy_evaluation_results, ())
+        self.assertEqual(failed.final_disposition, Disposition.NONE_SELECTED)
+        self.assertEqual(failed.case.execution_status, ExecutionStatus.NOT_APPLICABLE)
+
+    def test_mismatched_corrected_order_is_rejected_before_downstream_work(self) -> None:
+        original_input = replace(self.case_input(), order_identifier="99999")
+        stopped = run_synthetic_support_case(
+            original_input,
+            self.configuration(order=self.order(match=MatchStatus.NOT_FOUND)),
+        )
+
+        def unexpected_downstream_call(*args: object) -> object:
+            self.fail("downstream work must not run after an identifier mismatch")
+
+        configuration = self.configuration(order=self.order())
+        configuration = replace(
+            configuration,
+            shipment_lookup=unexpected_downstream_call,
+            carrier_evidence_lookup=unexpected_downstream_call,
+            address_comparison=unexpected_downstream_call,
+            execution=unexpected_downstream_call,
+        )
+
+        with self.assertRaisesRegex(
+            TransitionRejected,
+            "matched order identifier must equal the corrected identifier",
+        ):
+            correct_unmatched_order_identifier(
+                stopped,
+                original_input,
+                "order-999",
+                configuration,
+            )
+
+        self.assertEqual(
+            stopped.case.case_status, CaseStatus.AWAITING_CUSTOMER_ACTION
+        )
+        self.assertIsNone(stopped.case.order_ref)
+        self.assertEqual(stopped.case.shipment_refs, ())
+        self.assertEqual(stopped.case.carrier_evidence_snapshots, ())
+        self.assertEqual(stopped.case.policy_evaluation_results, ())
+        self.assertEqual(stopped.case.disposition, Disposition.NONE_SELECTED)
+        self.assertEqual(
+            stopped.case.execution_status, ExecutionStatus.NOT_APPLICABLE
+        )
 
     def test_audit_history_has_major_steps_in_order(self) -> None:
         result = run_synthetic_support_case(

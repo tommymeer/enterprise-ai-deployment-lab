@@ -25,6 +25,33 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-15 — Request customer correction when a supplied order identifier is not found
+
+- **Decision:** When deterministic order retrieval succeeds with `match_status = not_found`, move
+  the case directly from `intake` to the existing `awaiting_customer_action` state and record that
+  the customer must verify or provide a corrected order identifier. Preserve the customer report
+  and supplied identifier, attach no order, and stop the workflow as incomplete.
+- **Context:** A controlled offline linkage-failure experiment using `Order 99999` showed that
+  extraction succeeded, delivered-not-received routing was correct, and order lookup validly
+  returned no match, but the case entered terminal `intake_failed` without requesting a correction.
+  This exposed a gap between safe stopping and operational recovery.
+- **Alternatives considered:** Keep `intake_failed`; treat the result as missing extraction data;
+  send the case to `human_review`; or introduce a generic recovery framework or new state.
+- **Reasoning:** Extraction success means the customer supplied a syntactically valid, grounded
+  identifier; linkage failure means the deterministic order source could not match that supplied
+  value. They are distinct facts, so the repair must not pretend extraction omitted the identifier.
+  `awaiting_customer_action` already coherently represents a case blocked on information from the
+  customer. Until corrected linkage succeeds, there is no trusted order or shipment context, so
+  evidence gathering, policy evaluation, disposition selection, and execution remain blocked.
+  The initial repair exposed a missing resume path: the case paused correctly but could not legally
+  relink after a correction. The completed repair preserves the matched customer reference, records
+  each corrected identifier without replacing the original report, reruns only order lookup, and
+  supports `not_found → customer correction → relink → resume`. A second not-found result remains
+  blocked on customer action, while retrieval failure does not link or progress. Focused offline
+  tests cover the repaired experiment and unchanged matched and failed-retrieval paths; no live
+  validation is claimed.
+- **Status:** Accepted.
+
 ### 2026-08-10 — Keep extraction intake routing outside the support-case lifecycle
 
 - **Decision:** Add one deterministic intake router with four outcomes:
