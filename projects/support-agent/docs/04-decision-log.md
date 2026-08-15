@@ -25,6 +25,23 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-15 — Evaluate extraction separately with exact field comparisons
+
+- **Decision:** Start extraction evaluation with ten hand-curated synthetic messages, manually
+  expected nine-field outputs, scripted model responses, and exact per-field comparison.
+- **Context:** Workflow trajectory evaluation checks deterministic state and event ordering after
+  intake. Extraction is a separate probabilistic boundary: it must first produce a valid proposal,
+  and a valid proposal can still assign the wrong supported label, identifier, or customer claim.
+  Keeping those layers separate makes schema/validation failures distinct from schema-valid
+  semantic failures.
+- **Alternatives considered:** Reuse trajectory evaluation, introduce an evaluation platform or
+  registry, use fuzzy or weighted scores, or ask another model to judge outputs.
+- **Reasoning:** A small inspectable set and exact equality expose the mechanics and concrete
+  failures without obscuring them behind abstractions. No platform, semantic similarity, or LLM
+  judge is justified by this first increment, and this is not a production-quality model
+  evaluation claim.
+- **Status:** Accepted.
+
 ### 2026-08-15 — Separate final-outcome checks from concrete trace checks
 
 - **Context:** The first evaluation increment inspected four existing offline runs: successful
