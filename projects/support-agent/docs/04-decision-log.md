@@ -25,6 +25,24 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-15 — Separate final-outcome checks from concrete trace checks
+
+- **Context:** The first evaluation increment inspected four existing offline runs: successful
+  refund, carrier-evidence retrieval failure, refund execution failure, and unmatched order ID
+  followed by customer correction and successful resume. A correct final state alone could not
+  show whether the workflow reached it safely.
+- **Decision:** Keep scenario-specific outcome checks separate from five trace invariants observed
+  in those runs: successful linkage precedes downstream work; evidence gathering precedes policy;
+  policy routing precedes disposition; disposition precedes execution; and failed execution does
+  not close a case. The correction path's `order_identifier_correction_recorded` event counts as
+  successful linkage because that is how the existing workflow records relinking.
+- **Experiment:** Moving only `execution_started` before `disposition_selected` in a copy of the
+  successful refund event sequence preserved the closed, approved, successfully executed refund
+  outcome. The outcome check passed while the trajectory check failed with the intended invariant.
+- **Why no platform yet:** Two plain deterministic functions and one small offline script expose
+  the mechanics without an eval framework, registry, dashboard, external dependency, or model
+  judge. This is an initial learning increment, not a production-quality evaluation system.
+
 ### 2026-08-15 — Request customer correction when a supplied order identifier is not found
 
 - **Decision:** When deterministic order retrieval succeeds with `match_status = not_found`, move
