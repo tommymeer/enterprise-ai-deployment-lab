@@ -40,6 +40,10 @@ def run() -> str:
         workflow_case.selected_disposition,
         workflow_case.case_input.received_at,
         workflow_case.unresolved_policies,
+        proposed_refund_amount_minor=5_000,
+        proposed_refund_currency="USD",
+        autonomous_refund_limit_minor=10_000,
+        autonomous_refund_limit_currency="USD",
     )
     routed = route_customer_message_extraction(
         extraction_result,

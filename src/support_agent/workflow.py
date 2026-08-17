@@ -401,6 +401,10 @@ class WorkflowConfiguration:
     execution: ExecutionAdapter
     selected_disposition: Disposition
     evaluated_at: datetime
+    proposed_refund_amount_minor: int | None = field(default=None, kw_only=True)
+    proposed_refund_currency: str | None = field(default=None, kw_only=True)
+    autonomous_refund_limit_minor: int | None = field(default=None, kw_only=True)
+    autonomous_refund_limit_currency: str | None = field(default=None, kw_only=True)
     unresolved_policies: tuple[PolicyPlaceholder, ...] = ()
     human_reviewer: HumanReviewer | None = None
     execution_registry: ExecutionRegistry = field(default_factory=ExecutionRegistry)
@@ -425,6 +429,46 @@ class WorkflowConfiguration:
         if self.selected_disposition is Disposition.NONE_SELECTED:
             raise ValueError("selected_disposition must not be NONE_SELECTED")
         _utc(self.evaluated_at, "evaluated_at")
+        refund_authorization_fields = (
+            "proposed_refund_amount_minor",
+            "proposed_refund_currency",
+            "autonomous_refund_limit_minor",
+            "autonomous_refund_limit_currency",
+        )
+        if self.selected_disposition is Disposition.APPROVE_REFUND:
+            missing_fields = tuple(
+                field_name
+                for field_name in refund_authorization_fields
+                if getattr(self, field_name) is None
+            )
+            if missing_fields:
+                raise ValueError(
+                    "APPROVE_REFUND requires refund authorization inputs: "
+                    + ", ".join(missing_fields)
+                )
+        for field_name in (
+            "proposed_refund_amount_minor",
+            "autonomous_refund_limit_minor",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        for field_name in (
+            "proposed_refund_currency",
+            "autonomous_refund_limit_currency",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if (
+                not isinstance(value, str)
+                or len(value) != 3
+                or not value.isalpha()
+                or value != value.upper()
+            ):
+                raise ValueError(f"{field_name} must be a three-letter uppercase currency")
         object.__setattr__(self, "unresolved_policies", tuple(self.unresolved_policies))
         if any(
             not isinstance(policy, PolicyPlaceholder)
@@ -1110,6 +1154,56 @@ def _run_synthetic_support_case(
     if case.case_status is not CaseStatus.EXECUTING:
         record("workflow", "workflow_completed", final_outcome=case.case_status.value)
         return _result(case, trace, budget_tracker=budget)
+
+    if case.disposition is Disposition.APPROVE_REFUND:
+        currencies_match = (
+            configuration.proposed_refund_currency
+            == configuration.autonomous_refund_limit_currency
+        )
+        within_limit = (
+            currencies_match
+            and configuration.proposed_refund_amount_minor
+            <= configuration.autonomous_refund_limit_minor
+        )
+        if not within_limit:
+            detail = (
+                f"refund_amount_minor={configuration.proposed_refund_amount_minor}; "
+                f"currency={configuration.proposed_refund_currency}; "
+                f"autonomous_limit_minor={configuration.autonomous_refund_limit_minor}"
+            )
+            if not currencies_match:
+                detail += (
+                    "; autonomous_limit_currency="
+                    f"{configuration.autonomous_refund_limit_currency}"
+                )
+            change(
+                "authority",
+                "execution_authority_blocked",
+                lambda: case.block_refund_execution_for_authority(
+                    actor="synthetic-authority", detail=detail
+                ),
+                escalation=True,
+                detail=detail,
+            )
+            record(
+                "workflow",
+                "workflow_stopped",
+                final_outcome=case.case_status.value,
+                escalation=True,
+                detail="approved refund requires authorized human review",
+            )
+            return _result(
+                case,
+                trace,
+                completed=False,
+                failure_stage="authority",
+                failure_reason=(
+                    "proposed refund exceeds autonomous refund limit"
+                    if currencies_match
+                    else "refund currency does not match autonomous refund limit currency"
+                ),
+                budget_tracker=budget,
+            )
 
     idempotency_key = generate_idempotency_key(case.case_id, case.disposition)
     operation, created = configuration.execution_registry.get_or_create(

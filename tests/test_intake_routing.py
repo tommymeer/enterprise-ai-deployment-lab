@@ -127,6 +127,10 @@ class IntakeRoutingTest(unittest.TestCase):
             ),
             Disposition.APPROVE_REFUND,
             self.now,
+            proposed_refund_amount_minor=5_000,
+            proposed_refund_currency="USD",
+            autonomous_refund_limit_minor=10_000,
+            autonomous_refund_limit_currency="USD",
         )
 
     def workflow_result(self):

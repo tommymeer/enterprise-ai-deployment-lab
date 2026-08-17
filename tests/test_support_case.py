@@ -523,6 +523,53 @@ class SupportCaseTest(unittest.TestCase):
                 self.assertEqual(case.disposition, disposition)
                 self.assertEqual(case.execution_status, ExecutionStatus.FAILED)
 
+    def test_refund_authority_block_requires_approved_unattempted_refund(self) -> None:
+        wrong_state = self.case_at_disposition_selection()
+        with self.assertRaises(TransitionRejected):
+            wrong_state.block_refund_execution_for_authority(
+                actor="authority", detail="over limit"
+            )
+
+        wrong_disposition = self.case_at_disposition_selection()
+        wrong_disposition.select_disposition(
+            Disposition.APPROVE_REPLACEMENT, actor="agent"
+        )
+        with self.assertRaises(TransitionRejected):
+            wrong_disposition.block_refund_execution_for_authority(
+                actor="authority", detail="over limit"
+            )
+
+        already_started = self.case_at_disposition_selection()
+        already_started.select_disposition(Disposition.APPROVE_REFUND, actor="agent")
+        already_started.record_execution_status(
+            ExecutionStatus.IN_PROGRESS, actor="execution-system"
+        )
+        with self.assertRaises(TransitionRejected):
+            already_started.block_refund_execution_for_authority(
+                actor="authority", detail="over limit"
+            )
+
+    def test_refund_authority_block_preserves_approved_unattempted_state(self) -> None:
+        case = self.case_at_disposition_selection()
+        case.select_disposition(Disposition.APPROVE_REFUND, actor="agent")
+
+        case.block_refund_execution_for_authority(
+            actor="authority",
+            detail=(
+                "refund_amount_minor=15000; currency=USD; "
+                "autonomous_limit_minor=10000"
+            ),
+        )
+
+        self.assertEqual(case.case_status, CaseStatus.HUMAN_REVIEW)
+        self.assertEqual(case.disposition, Disposition.APPROVE_REFUND)
+        self.assertEqual(case.execution_status, ExecutionStatus.NOT_STARTED)
+        self.assertIsNone(case.closed_at)
+        event = case.audit_events[-1]
+        self.assertEqual(event.event_type, "execution_authority_blocked")
+        self.assertEqual(event.before_state.case_status, CaseStatus.EXECUTING)
+        self.assertEqual(event.after_state.case_status, CaseStatus.HUMAN_REVIEW)
+
     def test_invalid_lifecycle_transition_preserves_state_and_records_failure(
         self,
     ) -> None:

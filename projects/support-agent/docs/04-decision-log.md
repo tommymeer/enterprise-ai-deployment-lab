@@ -25,6 +25,23 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-17 — Separate refund authorization from policy and execution
+
+- **Decision:** After policy selects `approve_refund`, compare the proposed refund amount with the
+  configured autonomous refund limit before creating an execution operation. A refund of 15,000
+  USD minor units against a 10,000 USD-minor-unit limit routes to `human_review` with disposition
+  unchanged and execution still `not_started`; equal or lower amounts may follow the existing
+  execution path. Currency mismatch also routes to review.
+- **Context:** The workflow previously treated an executable disposition as sufficient authority
+  to invoke execution, so policy approval, authorization, and execution were not distinct controls.
+- **Alternatives considered:** Treat authority denial as execution failure, parse `order_value`, or
+  introduce a generic permission framework with roles and grants.
+- **Reasoning:** Authority denial occurs before an execution attempt and therefore is not execution
+  failure. Integer minor units avoid floating-point money comparisons, and explicit currencies
+  prevent unlike currencies from being compared. Refund-specific configuration and one narrow
+  domain transition answer the observed $150/$100 failure without speculative permission concepts.
+- **Status:** Accepted.
+
 ### 2026-08-15 — Establish the untouched live hard-extraction baseline
 
 - **Decision:** Run each of the six frozen hard extraction cases once through the existing Claude

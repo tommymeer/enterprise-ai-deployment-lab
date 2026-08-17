@@ -1,5 +1,6 @@
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
+from inspect import Parameter, signature
 import unittest
 
 from support_agent import (
@@ -19,6 +20,7 @@ from support_agent import (
     OrderReference,
     OperationStatus,
     PolicyPlaceholder,
+    PolicyRoute,
     RetrievalStatus,
     ShipmentReference,
     SupportCase,
@@ -174,6 +176,10 @@ class WorkflowTest(unittest.TestCase):
             unresolved,
             reviewer,
             registry or ExecutionRegistry(),
+            proposed_refund_amount_minor=5_000,
+            proposed_refund_currency="USD",
+            autonomous_refund_limit_minor=10_000,
+            autonomous_refund_limit_currency="USD",
         )
 
     def test_idempotency_key_uses_only_case_and_executable_disposition(self) -> None:
@@ -195,6 +201,41 @@ class WorkflowTest(unittest.TestCase):
                 generate_idempotency_key("case-001", invalid)
         with self.assertRaises(ValueError):
             generate_idempotency_key("", Disposition.APPROVE_REFUND)
+
+    def test_refund_authorization_inputs_are_keyword_only(self) -> None:
+        parameters = signature(WorkflowConfiguration).parameters
+        for field_name in (
+            "proposed_refund_amount_minor",
+            "proposed_refund_currency",
+            "autonomous_refund_limit_minor",
+            "autonomous_refund_limit_currency",
+        ):
+            self.assertEqual(parameters[field_name].kind, Parameter.KEYWORD_ONLY)
+
+    def test_approve_refund_requires_all_authorization_inputs(self) -> None:
+        for missing_field in (
+            "proposed_refund_amount_minor",
+            "proposed_refund_currency",
+            "autonomous_refund_limit_minor",
+            "autonomous_refund_limit_currency",
+        ):
+            with self.subTest(missing_field=missing_field):
+                with self.assertRaisesRegex(
+                    ValueError, "APPROVE_REFUND requires refund authorization inputs"
+                ):
+                    replace(self.configuration(), **{missing_field: None})
+
+    def test_deny_does_not_require_refund_authorization_inputs(self) -> None:
+        configuration = replace(
+            self.configuration(),
+            selected_disposition=Disposition.DENY,
+            proposed_refund_amount_minor=None,
+            proposed_refund_currency=None,
+            autonomous_refund_limit_minor=None,
+            autonomous_refund_limit_currency=None,
+        )
+
+        self.assertEqual(configuration.selected_disposition, Disposition.DENY)
 
     def test_shared_registry_suppresses_duplicate_and_reuses_result(self) -> None:
         registry = ExecutionRegistry()
@@ -480,6 +521,140 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertEqual(result.final_case_status, CaseStatus.CLOSED)
         self.assertEqual(result.case.execution_status, ExecutionStatus.SUCCEEDED)
+
+    def test_refund_above_autonomous_limit_routes_to_review_without_execution(self) -> None:
+        calls = 0
+
+        def execution(
+            key: str, disposition: Disposition, case: SupportCase
+        ) -> ExecutionResult:
+            nonlocal calls
+            calls += 1
+            return ExecutionResult(True, "synthetic refund result")
+
+        configuration = self.configuration(
+            disposition=Disposition.APPROVE_REFUND,
+            execution=execution,
+        )
+        configuration = replace(
+            configuration,
+            proposed_refund_amount_minor=15_000,
+            proposed_refund_currency="USD",
+            autonomous_refund_limit_minor=10_000,
+            autonomous_refund_limit_currency="USD",
+        )
+
+        result = run_synthetic_support_case(self.case_input(), configuration)
+        event_types = [event.event_type for event in result.trace_events]
+
+        self.assertEqual(
+            result.case.policy_evaluation_results[-1].route,
+            PolicyRoute.PROCEED_TO_DISPOSITION,
+        )
+        self.assertEqual(result.final_disposition, Disposition.APPROVE_REFUND)
+        self.assertEqual(result.final_case_status, CaseStatus.HUMAN_REVIEW)
+        self.assertFalse(result.completed)
+        self.assertEqual(
+            result.failure_reason,
+            "proposed refund exceeds autonomous refund limit",
+        )
+        self.assertEqual(result.case.execution_status, ExecutionStatus.NOT_STARTED)
+        self.assertIsNone(result.case.closed_at)
+        self.assertIsNone(result.execution_operation)
+        self.assertEqual(calls, 0)
+        self.assertIn("execution_authority_blocked", event_types)
+        blocked = next(
+            event
+            for event in result.trace_events
+            if event.event_type == "execution_authority_blocked"
+        )
+        self.assertEqual(blocked.step, "authority")
+        self.assertEqual(
+            blocked.detail,
+            "refund_amount_minor=15000; currency=USD; autonomous_limit_minor=10000",
+        )
+        self.assertNotIn("execution_operation_created", event_types)
+        self.assertNotIn("execution_started", event_types)
+        self.assertNotIn("execution_adapter_invoked", event_types)
+        self.assertFalse(
+            any(
+                event.event_type == "tool_called"
+                and event.tool_name == "synthetic_execution_adapter"
+                for event in result.trace_events
+            )
+        )
+
+    def test_refund_at_or_below_autonomous_limit_executes(self) -> None:
+        for amount in (10_000, 5_000):
+            with self.subTest(amount=amount):
+                calls = 0
+
+                def execution(
+                    key: str, disposition: Disposition, case: SupportCase
+                ) -> ExecutionResult:
+                    nonlocal calls
+                    calls += 1
+                    return ExecutionResult(True, "synthetic refund result")
+
+                configuration = replace(
+                    self.configuration(
+                        disposition=Disposition.APPROVE_REFUND,
+                        execution=execution,
+                    ),
+                    proposed_refund_amount_minor=amount,
+                    autonomous_refund_limit_minor=10_000,
+                )
+
+                result = run_synthetic_support_case(
+                    self.case_input(), configuration
+                )
+
+                self.assertTrue(result.completed)
+                self.assertEqual(result.final_case_status, CaseStatus.CLOSED)
+                self.assertEqual(
+                    result.case.execution_status, ExecutionStatus.SUCCEEDED
+                )
+                self.assertEqual(calls, 1)
+
+    def test_refund_currency_mismatch_routes_to_review_without_execution(self) -> None:
+        calls = 0
+
+        def execution(
+            key: str, disposition: Disposition, case: SupportCase
+        ) -> ExecutionResult:
+            nonlocal calls
+            calls += 1
+            return ExecutionResult(True, "synthetic refund result")
+
+        configuration = replace(
+            self.configuration(
+                disposition=Disposition.APPROVE_REFUND,
+                execution=execution,
+            ),
+            proposed_refund_amount_minor=5_000,
+            proposed_refund_currency="USD",
+            autonomous_refund_limit_minor=10_000,
+            autonomous_refund_limit_currency="EUR",
+        )
+
+        result = run_synthetic_support_case(self.case_input(), configuration)
+
+        self.assertFalse(result.completed)
+        self.assertEqual(
+            result.failure_reason,
+            "refund currency does not match autonomous refund limit currency",
+        )
+        self.assertEqual(result.final_case_status, CaseStatus.HUMAN_REVIEW)
+        self.assertEqual(result.case.execution_status, ExecutionStatus.NOT_STARTED)
+        self.assertIsNone(result.execution_operation)
+        self.assertEqual(calls, 0)
+        blocked = next(
+            event
+            for event in result.trace_events
+            if event.event_type == "execution_authority_blocked"
+        )
+        self.assertIn("currency=USD", blocked.detail or "")
+        self.assertIn("autonomous_limit_currency=EUR", blocked.detail or "")
 
     def test_carrier_inquiry_waits_for_external_follow_up(self) -> None:
         result = run_synthetic_support_case(

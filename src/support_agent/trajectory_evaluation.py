@@ -127,6 +127,10 @@ def _refund_configuration(
         scenario.unresolved_policies,
         None,
         ExecutionRegistry(),
+        proposed_refund_amount_minor=5_000,
+        proposed_refund_currency="USD",
+        autonomous_refund_limit_minor=10_000,
+        autonomous_refund_limit_currency="USD",
     )
 
 

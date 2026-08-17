@@ -688,6 +688,10 @@ def run_support_case_scenario(
         scenario.unresolved_policies,
         reviewer,
         registry if registry is not None else ExecutionRegistry(),
+        proposed_refund_amount_minor=5_000,
+        proposed_refund_currency="USD",
+        autonomous_refund_limit_minor=10_000,
+        autonomous_refund_limit_currency="USD",
     )
     if configuration_transform is not None:
         configuration = configuration_transform(configuration)

@@ -1010,6 +1010,27 @@ class SupportCase:
         self._case_status = CaseStatus.HUMAN_REVIEW
         self._append_event("state_transition", actor, before, self.snapshot(), detail)
 
+    def block_refund_execution_for_authority(
+        self, *, actor: str, detail: str
+    ) -> None:
+        """Route one approved, unattempted refund to review for insufficient authority."""
+        before = self.snapshot()
+        if (
+            self._case_status is not CaseStatus.EXECUTING
+            or self._disposition is not Disposition.APPROVE_REFUND
+            or self._execution_status is not ExecutionStatus.NOT_STARTED
+        ):
+            self._reject(
+                "authority can only block an approved, unattempted refund",
+                actor,
+                before,
+            )
+        _require_non_empty(detail, "detail")
+        self._case_status = CaseStatus.HUMAN_REVIEW
+        self._append_event(
+            "execution_authority_blocked", actor, before, self.snapshot(), detail
+        )
+
     def record_follow_up_result(
         self, result: FollowUpStatus, *, actor: str, detail: str | None = None
     ) -> None:
