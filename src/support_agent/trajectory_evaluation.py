@@ -109,11 +109,32 @@ def check_trajectory(
     ):
         failures.append("failed execution must not result in a closed case")
 
+    if "execution_authority_blocked" in events and any(
+        name in events
+        for name in (
+            "execution_operation_created",
+            "execution_started",
+            "execution_adapter_invoked",
+            "execution_result_recorded",
+            "execution_completed",
+        )
+    ):
+        failures.append(
+            "unauthorized refund execution: execution evidence is present despite "
+            "insufficient refund authority"
+        )
+
     return tuple(failures)
 
 
 def _refund_configuration(
-    scenario, order_reference
+    scenario,
+    order_reference,
+    *,
+    amount_minor: int = 5_000,
+    currency: str = "USD",
+    limit_minor: int = 10_000,
+    limit_currency: str = "USD",
 ) -> WorkflowConfiguration:
     return WorkflowConfiguration(
         SyntheticCustomerLookup(scenario.customer_reference),
@@ -127,19 +148,35 @@ def _refund_configuration(
         scenario.unresolved_policies,
         None,
         ExecutionRegistry(),
-        proposed_refund_amount_minor=5_000,
-        proposed_refund_currency="USD",
-        autonomous_refund_limit_minor=10_000,
-        autonomous_refund_limit_currency="USD",
+        proposed_refund_amount_minor=amount_minor,
+        proposed_refund_currency=currency,
+        autonomous_refund_limit_minor=limit_minor,
+        autonomous_refund_limit_currency=limit_currency,
     )
 
 
 def concrete_evaluation_cases() -> tuple[
     tuple[str, WorkflowResult, ExpectedOutcome, tuple[str, ...] | None], ...
 ]:
-    """Run the four inspected scenarios and construct one bad trace contrast."""
+    """Run concrete scenarios and construct two independent bad-path contrasts."""
     refund = get_support_case_scenario("refund-success")
     happy = run_support_case_scenario(refund).workflow_result
+    over_limit = run_synthetic_support_case(
+        refund.case_input,
+        _refund_configuration(
+            refund, refund.order_reference, amount_minor=15_000
+        ),
+        trace_id="evaluation-trace-refund-over-limit",
+        clock=lambda: refund.case_input.received_at,
+    )
+    currency_mismatch = run_synthetic_support_case(
+        refund.case_input,
+        _refund_configuration(
+            refund, refund.order_reference, limit_currency="EUR"
+        ),
+        trace_id="evaluation-trace-refund-currency-mismatch",
+        clock=lambda: refund.case_input.received_at,
+    )
     carrier_failure = run_support_case_scenario(
         get_support_case_scenario("carrier-evidence-failed")
     ).workflow_result
@@ -170,13 +207,51 @@ def concrete_evaluation_cases() -> tuple[
         Disposition.APPROVE_REFUND,
         ExecutionStatus.SUCCEEDED,
     )
-    happy_events = [event.event_type for event in happy.trace_events]
-    execution_started = happy_events.pop(happy_events.index("execution_started"))
-    happy_events.insert(happy_events.index("disposition_selected"), execution_started)
-    bad_events = tuple(happy_events)
+    execution_before_disposition_events = [
+        event.event_type for event in happy.trace_events
+    ]
+    execution_started = execution_before_disposition_events.pop(
+        execution_before_disposition_events.index("execution_started")
+    )
+    execution_before_disposition_events.insert(
+        execution_before_disposition_events.index("disposition_selected"),
+        execution_started,
+    )
+    blocked_event = next(
+        event
+        for event in over_limit.trace_events
+        if event.event_type == "execution_authority_blocked"
+    )
+    execution_position = next(
+        index
+        for index, event in enumerate(happy.trace_events)
+        if event.event_type == "execution_started"
+    )
+    bad_trace = list(happy.trace_events)
+    bad_trace.insert(
+        execution_position,
+        replace(
+            blocked_event,
+            trace_id=happy.trace_id,
+            case_id=happy.case.case_id,
+        ),
+    )
+    bad_trace = [
+        replace(event, sequence_number=index)
+        for index, event in enumerate(bad_trace)
+    ]
+    unauthorized_execution = replace(happy, trace_events=tuple(bad_trace))
+
+    authority_blocked = (
+        CaseStatus.HUMAN_REVIEW,
+        Disposition.APPROVE_REFUND,
+        ExecutionStatus.NOT_STARTED,
+    )
 
     return (
         ("happy_refund", happy, closed_refund, None),
+        ("over_limit_refund", over_limit, authority_blocked, None),
+        ("currency_mismatch_refund", currency_mismatch, authority_blocked, None),
         (
             "carrier_failure",
             carrier_failure,
@@ -194,5 +269,16 @@ def concrete_evaluation_cases() -> tuple[
             None,
         ),
         ("order_correction_recovery", recovered, closed_refund, None),
-        ("correct_outcome_bad_path", happy, closed_refund, bad_events),
+        (
+            "correct_outcome_execution_before_disposition",
+            happy,
+            closed_refund,
+            tuple(execution_before_disposition_events),
+        ),
+        (
+            "correct_outcome_unauthorized_execution",
+            unauthorized_execution,
+            closed_refund,
+            None,
+        ),
     )

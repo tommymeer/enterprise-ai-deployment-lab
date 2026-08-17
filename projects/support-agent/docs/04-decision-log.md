@@ -143,6 +143,19 @@ Add one entry per decision, most recent first.
   the mechanics without an eval framework, registry, dashboard, external dependency, or model
   judge. This is an initial learning increment, not a production-quality evaluation system.
 
+### 2026-08-17 — Evaluate refund authorization as a trajectory invariant
+
+- **Decision:** Keep policy selection, amount/currency authorization, consequential execution,
+  and evaluation as separate concerns. Treat an authorization block that leaves an approved refund
+  in `human_review` with execution `not_started` as a correct safe outcome. Extend the trajectory
+  evaluator only to reject traces that contain refund execution evidence despite the workflow having
+  recorded `execution_authority_blocked`.
+- **Reasoning:** A closed, successfully refunded final state can look correct even when execution
+  exceeded the configured autonomous authority. Outcome-only evaluation therefore cannot establish
+  that the path was acceptable. The existing concrete authority event supplies deterministic trace
+  evidence, so no roles, grants, scopes, generic policy model, or permission framework was added.
+- **Status:** Accepted.
+
 ### 2026-08-15 — Request customer correction when a supplied order identifier is not found
 
 - **Decision:** When deterministic order retrieval succeeds with `match_status = not_found`, move
