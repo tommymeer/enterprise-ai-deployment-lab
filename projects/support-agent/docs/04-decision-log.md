@@ -25,6 +25,46 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-19 — Bound frontier-review follow-up to evidenced needs
+
+- **Decision:** Before final portfolio packaging, add a bounded metamorphic extraction evaluation
+  using five existing canonical cases and four meaning-preserving variants of each: paraphrasing,
+  reordering, irrelevant detail, and changed verbosity. Expected structured facts must remain
+  unchanged. For each genuine observed evaluation failure, record its primary layer, supporting
+  evidence, and likely remedy, using: input/task specification, retrieval/context, model
+  interpretation, tool selection/parameters, external dependency, state/orchestration,
+  policy/authorization, execution, or evaluation/grader. Make no deterministic-fast-lane or
+  infrastructure change now.
+- **Context:** An Enterprise AI Frontier review raised semantic robustness, failure attribution,
+  deterministic routing, and infrastructure robustness as portfolio-readiness concerns.
+- **Alternatives considered:** Build a large new evaluation dataset, failure-classification
+  framework or analytics layer, deterministic replacement path, or additional infrastructure
+  abstraction; or make no bounded follow-up at all.
+- **Reasoning:** The small metamorphic set tests whether extraction follows case meaning rather than
+  superficial wording. Lightweight attribution improves diagnosis without new enums or machinery.
+  The current design already confines bounded language interpretation to the LLM while routing,
+  policy, authorization, and execution remain deterministic; a deterministic-vs-model
+  microbenchmark is warranted later only for a concrete deployment question. Existing failure
+  injection, retries, idempotency, safe stops, and adapter error handling cover most infrastructure
+  concerns. Treat a partial dependency response as malformed when it violates the structured
+  contract, and add infrastructure work only for a specifically observed uncovered failure mode.
+- **Status:** Accepted.
+
+### 2026-08-17 — Start deployment arithmetic with transparent assumptions
+
+- **Decision:** Begin the ROI model with explicit low/base/high placeholders, separate target-state
+  paths, and formulas tied to this project's evidence boundary. Do not populate business inputs from
+  external benchmarks unless their relevance and provenance are later established.
+- **Context:** The project has bounded technical cost and evaluation evidence but no observed
+  retailer workflow, workload, labor, compensation-loss, carrier-recovery, or adoption data.
+- **Alternatives considered:** Search for retailer or industry benchmarks now, present a single
+  point estimate, or defer deployment arithmetic until production data exists.
+- **Reasoning:** External averages could create false precision and hide the variables a real
+  discovery or pilot must measure. A transparent assumptions register makes uncertainty inspectable,
+  supports low/base/high sensitivity analysis, and can be replaced incrementally with authorized
+  business evidence without presenting synthetic values as facts.
+- **Status:** Accepted.
+
 ### 2026-08-17 — Separate refund authorization from policy and execution
 
 - **Decision:** After policy selects `approve_refund`, compare the proposed refund amount with the
