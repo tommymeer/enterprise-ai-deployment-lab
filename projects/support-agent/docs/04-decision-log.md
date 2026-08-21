@@ -25,6 +25,22 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-21 — Calibrate synthetic economics without creating false precision
+
+- **Decision:** Use relevant public benchmarks only to calibrate the direction and order of
+  magnitude of synthetic business assumptions, not as substitutes for customer discovery or pilot
+  data. Keep unsupported DNR-specific inputs explicitly synthetic, round hiring-manager-facing ROI
+  outputs, and retain exact arithmetic in the methodology for auditability.
+- **Context:** The synthetic deployment model now has illustrative inputs and outputs that benefit
+  from external plausibility checks, while no public source maps cleanly to the modeled DNR workflow.
+- **Alternatives considered:** Present exact modeled outputs as forecasts, adopt generic benchmarks
+  as DNR evidence, or omit all external calibration.
+- **Reasoning:** Calibration can expose implausible orders of magnitude, but it cannot turn wages
+  into loaded costs, response time into active handling time, or returns fraud into DNR unnecessary
+  compensation. Rounded headline results communicate input uncertainty while exact underlying math
+  remains reproducible.
+- **Status:** Accepted.
+
 ### 2026-08-19 — Bound frontier-review follow-up to evidenced needs
 
 - **Decision:** Before final portfolio packaging, add a bounded metamorphic extraction evaluation
