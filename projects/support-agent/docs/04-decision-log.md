@@ -25,6 +25,34 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-21 — Add a bounded semantic-robustness extraction evaluation
+
+- **Decision:** Derive exactly four meaning-preserving variants from each of five frozen canonical
+  extraction cases: paraphrased wording, reordered facts, an irrelevant detail, and materially
+  different verbosity. Grade every variant with the existing nine-field comparator, changing only
+  the expected `original_message`. For a failed result, emit a preliminary primary layer,
+  supporting evidence, and likely remedy alongside the retained raw output; confirm or revise that
+  attribution during human inspection. The authorized live run produced 20/20 structurally valid
+  outputs and 17/20 initial semantic matches. All eight other fields matched in every case; the
+  three apparent failures differed only because valid reasons using “needed” fell outside the
+  comparator's accepted “missing,” “required,” or “not provided” vocabulary. Extend only that
+  predicate to accept non-negated “needed” (and the contract-equivalent “absent”), leaving the
+  other eight fields exact.
+- **Context:** The canonical and hard extraction sets test selected meanings, but not whether
+  equivalent meanings remain stable under controlled surface-form changes.
+- **Alternatives considered:** A larger dataset, fuzzy scoring, an LLM judge, a generic taxonomy
+  framework, persistent analytics, or changing the extraction prompt before observing failures.
+- **Reasoning:** The 20 derived cases isolate four surface-form transformations while preserving
+  the frozen structured facts. Exact structured-field grading keeps regressions visible. The small
+  attribution record is enough to distinguish a likely model-interpretation failure from an
+  ambiguous input or brittle grader during review without adding infrastructure. Inspection and
+  retained-output rescoring confirmed 20/20 semantic matches after the narrow evaluator repair;
+  the three preliminary automated “model interpretation” attributions are therefore finally
+  attributed to `evaluation/grader`. No production-model or workflow change was required. The live
+  run used 16,783 input tokens, 2,814 output tokens, 45,980.37 ms total provider latency, and an
+  estimated $0.092559, with no provider or validation failures.
+- **Status:** Accepted; live validation and retained-output rescoring complete.
+
 ### 2026-08-21 — Calibrate synthetic economics without creating false precision
 
 - **Decision:** Use relevant public benchmarks only to calibrate the direction and order of

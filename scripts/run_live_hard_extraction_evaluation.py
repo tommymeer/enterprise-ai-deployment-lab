@@ -22,6 +22,8 @@ from support_agent import (
 from support_agent.extraction import CustomerMessageExtraction
 from support_agent.extraction_evaluation import (
     ExtractionEvalCase,
+    ExtractionEvalResult,
+    attribute_extraction_failure,
     compare_extractions,
     get_hard_extraction_eval_cases,
 )
@@ -124,7 +126,16 @@ def print_plan(stream: TextIO) -> None:
 
 
 def run_live_evaluation(client: ModelClient, stream: TextIO = sys.stdout) -> int:
-    cases = _cases()
+    return run_bounded_live_evaluation(client, _cases(), AUTHORIZED_ESTIMATED_SPEND_LIMIT_USD, stream)
+
+
+def run_bounded_live_evaluation(
+    client: ModelClient,
+    cases: tuple[ExtractionEvalCase, ...],
+    authorized_spend_limit_usd: float,
+    stream: TextIO = sys.stdout,
+) -> int:
+    """Run a caller-supplied frozen extraction set with the same bounded mechanics."""
     attempted = valid = semantic_matches = total_input = total_output = 0
     total_latency_ms = total_cost = 0.0
     provider_failures = validation_failures = 0
@@ -133,7 +144,8 @@ def run_live_evaluation(client: ModelClient, stream: TextIO = sys.stdout) -> int
 
     for index, case in enumerate(cases):
         remaining_calls = len(cases) - index
-        if not spend_guard_allows_call(total_cost, remaining_calls):
+        conservative_total = total_cost + remaining_calls * MAXIMUM_COST_PER_CALL_USD
+        if conservative_total > authorized_spend_limit_usd:
             _write_record(stream, {"error": "spend_guard_blocked_call", "case_id": case.case_id})
             break
 
@@ -152,6 +164,17 @@ def run_live_evaluation(client: ModelClient, stream: TextIO = sys.stdout) -> int
                     "error_type": error.error_type,
                     "retryable": error.retryable,
                     "request_id_present": error.request_id is not None,
+                    "failure_attribution": {
+                        "primary_failure_layer": "external dependency",
+                        "supporting_evidence": (
+                            "Anthropic request failed before an extraction could be graded: "
+                            f"{error.error_type} (status {error.status_code})."
+                        ),
+                        "likely_remedy": (
+                            "Inspect provider availability and the retained error metadata; "
+                            "retry only in a separately authorized bounded run if appropriate."
+                        ),
+                    },
                 },
             )
             continue
@@ -181,6 +204,9 @@ def run_live_evaluation(client: ModelClient, stream: TextIO = sys.stdout) -> int
                 field_matches[comparison.field_name] += 1
         semantic_match = bool(comparisons) and all(item.matched for item in comparisons)
         semantic_matches += int(semantic_match)
+        attribution = attribute_extraction_failure(
+            ExtractionEvalResult(case.case_id, result, comparisons)
+        )
         mismatches = [
             {
                 "field": item.field_name,
@@ -198,6 +224,15 @@ def run_live_evaluation(client: ModelClient, stream: TextIO = sys.stdout) -> int
                 "validation_reason": result.validation_reason,
                 "semantic_result": "PASS" if semantic_match else "FAIL",
                 "mismatched_fields": mismatches,
+                "failure_attribution": (
+                    {
+                        "primary_failure_layer": attribution.primary_failure_layer,
+                        "supporting_evidence": attribution.supporting_evidence,
+                        "likely_remedy": attribution.likely_remedy,
+                    }
+                    if attribution is not None
+                    else None
+                ),
                 "actual_extraction": _extraction_record(result.extraction),
                 "raw_model_output": response.response_text,
                 "input_tokens": response.input_token_count,
@@ -228,9 +263,9 @@ def run_live_evaluation(client: ModelClient, stream: TextIO = sys.stdout) -> int
             "total_output_tokens": total_output,
             "total_latency_ms": round(total_latency_ms, 3),
             "total_estimated_cost_usd": round(total_cost, 8),
-            "authorized_estimated_spend_limit_usd": AUTHORIZED_ESTIMATED_SPEND_LIMIT_USD,
+            "authorized_estimated_spend_limit_usd": authorized_spend_limit_usd,
             "estimated_spend_limit_respected": (
-                total_cost <= AUTHORIZED_ESTIMATED_SPEND_LIMIT_USD
+                total_cost <= authorized_spend_limit_usd
             ),
             "provider_failures": provider_failures,
             "validation_failures": validation_failures,

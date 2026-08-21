@@ -90,6 +90,29 @@ class ExtractionEvaluationTest(unittest.TestCase):
             )
         )
 
+    def test_retained_semantic_run_clarification_wordings_pass(self) -> None:
+        reasons = (
+            "The order identifier is needed to locate the order and investigate the delivery issue.",
+            "The order identifier is needed to locate and investigate this delivery issue.",
+            "The customer did not provide an order identifier needed to locate the order.",
+        )
+        self.assertTrue(
+            all(
+                self.clarification_match(
+                    "missing_order", clarification_reason=reason
+                )
+                for reason in reasons
+            )
+        )
+
+    def test_negated_needed_clarification_text_fails(self) -> None:
+        self.assertFalse(
+            self.clarification_match(
+                "missing_order",
+                clarification_reason="The order identifier is not needed.",
+            )
+        )
+
     def test_unrelated_nonempty_clarification_text_fails(self) -> None:
         self.assertFalse(
             self.clarification_match(
