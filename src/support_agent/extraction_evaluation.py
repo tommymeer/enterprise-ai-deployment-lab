@@ -20,6 +20,8 @@ class ExtractionEvalCase:
     case_id: str
     customer_message: str
     expected: CustomerMessageExtraction
+    source_case_id: str | None = None
+    transformation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +51,13 @@ class ExtractionEvalResult:
     @property
     def differing_fields(self) -> tuple[FieldComparison, ...]:
         return tuple(item for item in self.field_comparisons if not item.matched)
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionFailureAttribution:
+    primary_failure_layer: str
+    supporting_evidence: str
+    likely_remedy: str
 
 
 def _expected(
@@ -143,6 +152,88 @@ def get_hard_extraction_eval_cases() -> tuple[ExtractionEvalCase, ...]:
     )
 
 
+def get_semantic_robustness_eval_cases() -> tuple[ExtractionEvalCase, ...]:
+    """Return four meaning-preserving variants of five frozen canonical cases."""
+    canonical = {case.case_id: case for case in get_extraction_eval_cases()}
+    variants = {
+        "missing_order": {
+            "paraphrased": "My parcel never arrived, although the carrier marked it delivered.",
+            "facts_reordered": "My package is missing, but the carrier says it was delivered.",
+            "irrelevant_detail": (
+                "The carrier says delivered, but my package is missing. I noticed while making coffee."
+            ),
+            "different_verbosity": "Marked delivered; package missing.",
+        },
+        "unknown_issue": {
+            "paraphrased": "Could you swap the size on order ORD-1003?",
+            "facts_reordered": "For order ORD-1003, please change the size.",
+            "irrelevant_detail": (
+                "Please change the size for order ORD-1003. The item arrived in a blue box."
+            ),
+            "different_verbosity": (
+                "I am contacting support because I would like the size of the item associated with "
+                "order ORD-1003 changed to a different size."
+            ),
+        },
+        "order_and_tracking": {
+            "paraphrased": (
+                "I cannot locate the parcel for order ORD-1005 even though tracking TRK-5005 marks it delivered."
+            ),
+            "facts_reordered": (
+                "I do not have it; tracking TRK-5005 says delivered for order ORD-1005."
+            ),
+            "irrelevant_detail": (
+                "Order ORD-1005, tracking TRK-5005, says delivered; I do not have it. It was due before lunch."
+            ),
+            "different_verbosity": "ORD-1005 / TRK-5005: delivered, but missing.",
+        },
+        "multiple_identifiers": {
+            "paraphrased": (
+                "Customer 7712 reports that the parcel on invoice 4408 for order A-9006 has not arrived."
+            ),
+            "facts_reordered": (
+                "The package for invoice 4408 is missing; this is customer 7712 asking about order A-9006."
+            ),
+            "irrelevant_detail": (
+                "Customer 7712 asks about order A-9006; invoice 4408 says its package is missing. The box was brown."
+            ),
+            "different_verbosity": (
+                "I am customer 7712, and I am reaching out about the shipment connected to invoice "
+                "4408 and order A-9006 because the package has not arrived."
+            ),
+        },
+        "explicit_address_correct": {
+            "paraphrased": (
+                "Order ORD-1008 went to the wrong place despite my having supplied the correct address."
+            ),
+            "facts_reordered": (
+                "The address I provided was correct, yet order ORD-1008 was delivered elsewhere."
+            ),
+            "irrelevant_detail": (
+                "Order ORD-1008 was delivered elsewhere even though my address was correct. I checked after dinner."
+            ),
+            "different_verbosity": (
+                "I carefully reviewed the address that I entered for order ORD-1008 and confirmed it was "
+                "correct, but the shipment was nevertheless delivered to a different location."
+            ),
+        },
+    }
+    cases = []
+    for source_case_id, transformations in variants.items():
+        source = canonical[source_case_id]
+        for transformation, message in transformations.items():
+            cases.append(
+                ExtractionEvalCase(
+                    case_id=f"{source_case_id}__{transformation}",
+                    customer_message=message,
+                    expected=replace(source.expected, original_message=message),
+                    source_case_id=source_case_id,
+                    transformation=transformation,
+                )
+            )
+    return tuple(cases)
+
+
 def compare_extractions(
     expected: CustomerMessageExtraction, actual: CustomerMessageExtraction
 ) -> tuple[FieldComparison, ...]:
@@ -182,8 +273,9 @@ def clarification_reason_matches(
     words = set(reason.lower().replace("-", " ").split())
     refers_to_order_identifier = {"order", "identifier"} <= words
     explains_missing_or_required = bool(
-        words & {"missing", "required"}
+        words & {"missing", "absent", "required"}
         or "not provided" in reason.lower()
+        or ("needed" in words and "not needed" not in reason.lower())
     )
     return refers_to_order_identifier and explains_missing_or_required
 
@@ -198,6 +290,35 @@ def evaluate_extraction_case(
         else ()
     )
     return ExtractionEvalResult(case.case_id, result, comparisons)
+
+
+def attribute_extraction_failure(
+    result: ExtractionEvalResult,
+) -> ExtractionFailureAttribution | None:
+    """Give a small preliminary attribution for an observed extraction failure."""
+    if result.semantic_match is True:
+        return None
+    if not result.valid_output:
+        return ExtractionFailureAttribution(
+            primary_failure_layer="model interpretation",
+            supporting_evidence=(
+                "The model response failed the extraction contract: "
+                f"{result.extraction_result.validation_reason}"
+            ),
+            likely_remedy=(
+                "Inspect the raw response and prompt adherence; change the task specification "
+                "only if multiple failures show the instruction is ambiguous."
+            ),
+        )
+    mismatches = ", ".join(item.field_name for item in result.differing_fields)
+    return ExtractionFailureAttribution(
+        primary_failure_layer="model interpretation",
+        supporting_evidence=f"Valid output disagreed with ground truth on: {mismatches}.",
+        likely_remedy=(
+            "Inspect the message, expected value, and raw response together; repair the grader "
+            "only if the actual value is semantically valid under the nine-field contract."
+        ),
+    )
 
 
 def scripted_response(extraction: CustomerMessageExtraction) -> ModelResponse:
@@ -264,3 +385,11 @@ def run_scripted_hard_extraction_eval() -> tuple[ExtractionEvalResult, ...]:
         )
         attempts.append(replace(result, case_id=attempt_id))
     return tuple(attempts)
+
+
+def run_scripted_semantic_robustness_eval() -> tuple[ExtractionEvalResult, ...]:
+    """Run all semantic variants with their unchanged canonical structured facts."""
+    return tuple(
+        evaluate_extraction_case(case, scripted_response(case.expected))
+        for case in get_semantic_robustness_eval_cases()
+    )
