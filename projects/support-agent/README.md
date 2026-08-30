@@ -11,28 +11,55 @@ safely.
 
 ## Architecture at a glance
 
-```text
-Customer message
-      |
-      v
-[LLM boundary: one extraction call] ----> structured extraction contract
-      |
-      v  deterministic boundary begins
-intake/router ----> explicit case state
-      |
-      v
-evidence adapters: customer + order + shipment + carrier + address comparison
-      |
-      v
-policy ----> disposition ----> authorization
-                                  | permitted
-                    blocked       v
-              human review <---- execution adapter/API
-                    ^              | (stable operation identity)
-                    | failure      v
-                    +----------- result / follow-up / closure
+```mermaid
+flowchart LR
+    MESSAGE[Customer message]
 
-Every workflow step updates in-process state and an ordered, append-only trace.
+    subgraph LLM["LLM boundary — probabilistic"]
+        EXTRACT["Bounded extraction<br/>one model call"]
+    end
+
+    subgraph WORKFLOW["Deterministic workflow boundary"]
+        VALIDATE["Validate structured<br/>extraction contract"]
+        INTAKE[Intake / router]
+        STATE["Explicit case state<br/>in process"]
+        EVIDENCE["Evidence adapters<br/>customer · order · shipment · carrier<br/>+ address comparison"]
+        POLICY[Deterministic policy]
+        DISPOSITION[Disposition]
+        AUTHORIZATION[Authorization]
+        EXECUTION["Execution adapter / consequential API<br/>stable operation identity + idempotency"]
+        REVIEW[Human review]
+        SAFESTOP[Safe stop]
+        FINAL[Final result / case state]
+
+        VALIDATE --> INTAKE --> STATE --> EVIDENCE --> POLICY --> DISPOSITION --> AUTHORIZATION
+        AUTHORIZATION -->|permitted| EXECUTION -->|success| FINAL
+        AUTHORIZATION -->|blocked| REVIEW --> FINAL
+        EXECUTION -->|failure| REVIEW
+        VALIDATE -->|invalid output| SAFESTOP --> FINAL
+        EVIDENCE -->|provider / API failure| SAFESTOP
+    end
+
+    TRACE["Ordered append-only trace / audit history<br/>in process; updated across the case workflow"]
+
+    MESSAGE --> EXTRACT --> VALIDATE
+    STATE -.-> TRACE
+    EVIDENCE -.-> TRACE
+    POLICY -.-> TRACE
+    DISPOSITION -.-> TRACE
+    AUTHORIZATION -.-> TRACE
+    EXECUTION -.-> TRACE
+    REVIEW -.-> TRACE
+    SAFESTOP -.-> TRACE
+
+    classDef llm fill:#fff4cc,stroke:#9a6700,stroke-width:2px,color:#24292f;
+    classDef deterministic fill:#ddf4ff,stroke:#0969da,stroke-width:1px,color:#24292f;
+    classDef state fill:#dafbe1,stroke:#1a7f37,stroke-width:2px,color:#24292f;
+    classDef safety fill:#ffebe9,stroke:#cf222e,stroke-width:1px,color:#24292f;
+    class EXTRACT llm;
+    class VALIDATE,INTAKE,EVIDENCE,POLICY,DISPOSITION,AUTHORIZATION,EXECUTION deterministic;
+    class STATE,FINAL,TRACE state;
+    class REVIEW,SAFESTOP safety;
 ```
 
 The prototype supplies the evidence and execution interfaces with deterministic synthetic
