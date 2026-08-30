@@ -1204,6 +1204,17 @@ def _run_synthetic_support_case(
                 ),
                 budget_tracker=budget,
             )
+        record(
+            "authority",
+            "execution_authority_granted",
+            tool_arguments={
+                "refund_amount_minor": configuration.proposed_refund_amount_minor,
+                "currency": configuration.proposed_refund_currency,
+                "autonomous_limit_minor": configuration.autonomous_refund_limit_minor,
+                "autonomous_limit_currency": configuration.autonomous_refund_limit_currency,
+            },
+            evaluation_result="granted",
+        )
 
     idempotency_key = generate_idempotency_key(case.case_id, case.disposition)
     operation, created = configuration.execution_registry.get_or_create(

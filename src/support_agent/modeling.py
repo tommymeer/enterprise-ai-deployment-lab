@@ -85,6 +85,25 @@ class ModelClient(Protocol):
     def complete(self, request: ModelRequest) -> ModelResponse: ...
 
 
+@dataclass(slots=True)
+class RecordingModelClient:
+    """Delegate model calls while retaining the exact boundary records."""
+
+    client: ModelClient
+    _calls: list[tuple[ModelRequest, ModelResponse]] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    @property
+    def calls(self) -> tuple[tuple[ModelRequest, ModelResponse], ...]:
+        return tuple(self._calls)
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        response = self.client.complete(request)
+        self._calls.append((request, response))
+        return response
+
+
 @dataclass(frozen=True, slots=True)
 class ScriptedModelClient:
     """Return one predetermined response and retain requests for inspection."""

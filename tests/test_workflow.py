@@ -569,6 +569,7 @@ class WorkflowTest(unittest.TestCase):
             if event.event_type == "execution_authority_blocked"
         )
         self.assertEqual(blocked.step, "authority")
+        self.assertNotIn("execution_authority_granted", event_types)
         self.assertEqual(
             blocked.detail,
             "refund_amount_minor=15000; currency=USD; autonomous_limit_minor=10000",
@@ -615,6 +616,21 @@ class WorkflowTest(unittest.TestCase):
                     result.case.execution_status, ExecutionStatus.SUCCEEDED
                 )
                 self.assertEqual(calls, 1)
+                granted = next(
+                    event
+                    for event in result.trace_events
+                    if event.event_type == "execution_authority_granted"
+                )
+                self.assertEqual(granted.step, "authority")
+                self.assertEqual(
+                    dict(granted.tool_arguments),
+                    {
+                        "refund_amount_minor": amount,
+                        "currency": "USD",
+                        "autonomous_limit_minor": 10_000,
+                        "autonomous_limit_currency": "USD",
+                    },
+                )
 
     def test_refund_currency_mismatch_routes_to_review_without_execution(self) -> None:
         calls = 0
@@ -648,6 +664,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.case.execution_status, ExecutionStatus.NOT_STARTED)
         self.assertIsNone(result.execution_operation)
         self.assertEqual(calls, 0)
+        self.assertNotIn(
+            "execution_authority_granted",
+            [event.event_type for event in result.trace_events],
+        )
         blocked = next(
             event
             for event in result.trace_events

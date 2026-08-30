@@ -209,7 +209,9 @@ class SupportCaseScenarioTest(unittest.TestCase):
                     imported.add(node.module.split(".")[0])
             return imported
 
-        allowed_standard_network_modules = {"anthropic_adapter.py"}
+        # The demo server is an explicit localhost HTTP boundary; it does not add an
+        # outbound provider dependency. All third-party network clients stay forbidden.
+        allowed_standard_network_modules = {"anthropic_adapter.py", "demo_server.py"}
         forbidden_standard_network_imports = {"urllib", "socket"}
         forbidden_everywhere = {"anthropic", "openai", "requests", "httpx"}
         for path in source_root.glob("*.py"):
