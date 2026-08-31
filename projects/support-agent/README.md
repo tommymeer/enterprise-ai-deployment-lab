@@ -127,7 +127,7 @@ not a claim of production recovery infrastructure.
 - **Negative controls:** deliberately bad traces prove the evaluator detects execution before
   disposition and execution despite insufficient authority.
 
-The ordinary offline suite currently passes **237 tests** and never makes a paid model call. Live
+The ordinary offline suite currently passes **252 tests** and never makes a paid model call. Live
 Anthropic evaluations are separate, manually confirmed commands because they cost money and are not
 the interview demo path.
 
@@ -157,18 +157,53 @@ uv sync
 source .venv/bin/activate
 ```
 
-For demo reliability, the representative offline happy path substitutes a scripted extraction
-result behind the same model-client boundary used by the workflow; synthetic evidence and execution
-require no API key and make no paid call. The Anthropic adapter is exercised separately through
-bounded live evaluations, so the interview demo does not depend on network or provider availability:
+The browser demo is organized around one customer message, a deterministic customer-facing outcome,
+and one readable execution trace. Its expandable evidence exposes the model request/response,
+validated extraction, actual synthetic adapter names and payloads, policy and authority inputs,
+state changes, latency/retries, and operation identity. The implementation remains split across
+`demo.py` (composition/view model), `demo_server.py` and `demo_static/index.html` (localhost UI),
+`modeling.py` / `anthropic_adapter.py` (model boundary), `extraction.py` (validation), `workflow.py`
+(orchestration/tools), `domain.py` (state), `execution.py` (idempotency), and `tracing.py` (events).
+
+The default mode locks the textarea to the representative fixture and labels extraction as
+scripted; synthetic evidence and execution require no API key and make no paid call:
 
 ```bash
-python scripts/run_offline_support_case.py
+python -m support_agent.demo_server
 ```
 
-The output walks from the customer message through extraction, evidence, policy, disposition,
-authorized refund execution, final state, and all ordered trace event names. Run the offline tests
-and evaluations with:
+Live Claude extraction is a separate explicit opt-in. It changes only the extraction client, makes
+at most one provider call per run, requires `ANTHROPIC_API_KEY`, and never falls back to scripted
+output. Starting it does not itself make a call; pressing **Run case** does and therefore requires
+the paid-call approval described in `AGENTS.md`:
+
+```bash
+python -m support_agent.demo_server --enable-live
+```
+
+### Try the demo
+
+Start the live-enabled server and open the localhost URL it prints:
+
+```bash
+python -m support_agent.demo_server --enable-live
+```
+
+Live Claude runs require `ANTHROPIC_API_KEY`; select **Offline — scripted extraction** to use the
+locked, no-provider-call fixture instead.
+
+| Order ID | Path |
+| --- | --- |
+| `12345` | Autonomous refund success |
+| `24680` | Autonomous refund success with different retailer/carrier data |
+| `31415` | Missing carrier evidence; further evidence required |
+| `27182` | Refund approved in principle but blocked by autonomous authority limit |
+| Unknown ID | Order not found; no refund executed |
+
+Set **Execution mode** to **Inject refund execution failure** with a supported refund-eligible order
+to test downstream execution failure. Unknown IDs fail safely and never map to a fabricated record.
+
+Run the offline tests and evaluations with:
 
 ```bash
 python -m unittest discover -s tests
@@ -204,7 +239,7 @@ repository's paid-call approval and cost-reporting rules before using one.
 | Failure handling and budgets | [`failures.py`](../../src/support_agent/failures.py), [`budgets.py`](../../src/support_agent/budgets.py), [`test_workflow.py`](../../tests/test_workflow.py) |
 | Extraction and robustness evals | [`extraction_evaluation.py`](../../src/support_agent/extraction_evaluation.py), [`test_extraction_evaluation.py`](../../tests/test_extraction_evaluation.py), [`test_semantic_robustness_evaluation.py`](../../tests/test_semantic_robustness_evaluation.py) |
 | Outcome / trajectory evals | [`trajectory_evaluation.py`](../../src/support_agent/trajectory_evaluation.py), [`test_trajectory_evaluation.py`](../../tests/test_trajectory_evaluation.py) |
-| Demo entry point | [`run_offline_support_case.py`](../../scripts/run_offline_support_case.py) |
+| Demo entry point | [`demo_server.py`](../../src/support_agent/demo_server.py), [`demo.py`](../../src/support_agent/demo.py) |
 | Economic model | [`05-deployment-arithmetic.md`](docs/05-deployment-arithmetic.md) |
 | Safe rollout | [`06-production-rollout.md`](docs/06-production-rollout.md) |
 

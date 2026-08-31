@@ -877,6 +877,8 @@ def _run_synthetic_support_case(
                     "record_id": getattr(value, "ref_id", None),
                     "retrieval_status": getattr(value, "retrieval_status").value,
                     "match_status": getattr(value, "match_status").value,
+                    "order_value": getattr(value, "order_value", None),
+                    "item_category": getattr(value, "item_category", None),
                 },
             )
         except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
@@ -994,6 +996,12 @@ def _run_synthetic_support_case(
             lambda value: {
                 "shipment_id": value.ref_id,
                 "retrieval_status": value.retrieval_status.value,
+                "carrier": value.carrier,
+                "tracking_id": value.tracking_id,
+                "fulfillment_timestamp": (
+                    value.fulfillment_timestamp.isoformat()
+                    if value.fulfillment_timestamp is not None else None
+                ),
             },
         )
     except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:
@@ -1025,6 +1033,15 @@ def _run_synthetic_support_case(
                 "retrieval_status": (
                     value.retrieval_status.value if value is not None else None
                 ),
+                "delivery_status": getattr(value, "delivery_status", None),
+                "delivery_timestamp": (
+                    value.delivery_timestamp.isoformat()
+                    if value is not None and value.delivery_timestamp is not None else None
+                ),
+                "tracking_event_history": " > ".join(
+                    getattr(value, "tracking_event_history", ())
+                ),
+                "picture_proof_available": getattr(value, "picture_proof_available", None),
             },
         )
     except (SyntheticOperationalError, ExecutionBudgetExceeded, RetryExhausted) as failure:

@@ -25,6 +25,44 @@ Add one entry per decision, most recent first.
 
 ---
 
+### 2026-08-31 — Use a fixed keyed retailer dataset for the live demo
+
+- **Decision:** Add four explicit synthetic ecommerce orders keyed by customer-facing order ID.
+  The validated extracted ID is passed to a deterministic order adapter; matched records lead to
+  their own shipment and carrier evidence, while unknown IDs return a real `not_found` result.
+  Reuse the existing missing-evidence and refund-authority behavior for variation.
+- **Context:** The live extraction path accepted arbitrary wording, but downstream data still
+  represented one successful order. Dynamically fabricating a matching record would obscure the
+  boundary between model interpretation and retailer retrieval.
+- **Alternatives considered:** Add a database, generate records from input, expand the scenario
+  framework, or introduce new policy branches solely for demo variety.
+- **Reasoning:** A small immutable in-memory map is enough to demonstrate real identifier-driven
+  retrieval and truthful unknown-ID handling. Enriching the existing tool return payloads exposes
+  order-specific evidence without adding another trace layer or external dependency.
+- **Status:** Accepted.
+
+### 2026-08-31 — Organize the interview demo around one execution trace
+
+- **Decision:** Replace the inspector-style pipeline, timeline, case-detail, implementation-map,
+  score-tile, and raw-trace surfaces with a customer-message input, deterministic customer-facing
+  outcome, and one readable execution-trace view model. Pair the existing tool call/return events
+  by their recorded tool name, retain their raw evidence per row, keep scripted input locked, and
+  allow live Claude extraction only behind an explicit server flag with no fallback.
+- **Context:** The technically complete demo repeated the same workflow evidence across several
+  dashboard sections and made the customer journey harder to explain. The workflow already records
+  the inputs, normalized results, state, retries, latency, authority, and operation identity needed
+  by a single trace. The synthetic lookup fixture also has a bounded supported order and must not
+  imply arbitrary retailer coverage.
+- **Alternatives considered:** Keep the existing surfaces and restyle them; add a frontend
+  framework; generate customer copy with another model call; or make arbitrary synthetic orders
+  succeed dynamically.
+- **Reasoning:** A deterministic view-model projection is the smallest change that exposes real
+  evidence without changing downstream behavior or inventing reasoning. Customer copy is derived
+  from disposition, execution status, and final state. Unsupported extracted IDs become a recorded
+  synthetic `not_found` result. The live path reuses the existing 512-token, 30-second Anthropic
+  adapter configuration and stops on provider errors before routing.
+- **Status:** Accepted.
+
 ### 2026-08-21 — Add a bounded semantic-robustness extraction evaluation
 
 - **Decision:** Derive exactly four meaning-preserving variants from each of five frozen canonical
