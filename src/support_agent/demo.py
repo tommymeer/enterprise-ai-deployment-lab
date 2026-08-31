@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from .extraction import extract_customer_message
+from .extraction import ExtractionResult, extract_customer_message
 from .extraction_evaluation import (
     run_scripted_extraction_eval,
     run_scripted_hard_extraction_eval,
@@ -91,9 +91,15 @@ def _configuration(scenario):
 
 
 def demo_options() -> dict[str, object]:
+    customer_message = next(
+        item.customer_message
+        for item in get_extraction_scenarios()
+        if item.scenario_id == "complete-order"
+    )
     return {"scenarios": [
         {"id": item, "title": get_support_case_scenario(item).title,
-         "description": get_support_case_scenario(item).description}
+         "description": get_support_case_scenario(item).description,
+         "customer_message": customer_message}
         for item in DEMO_SCENARIO_IDS
     ], "mode": "scripted/offline", "input_editable": False}
 
@@ -103,20 +109,98 @@ def eval_evidence() -> dict[str, object]:
     hard = run_scripted_hard_extraction_eval()
     semantic = run_scripted_semantic_robustness_eval()
     trajectory = concrete_evaluation_cases()
-    trajectory_passes = sum(
+    extraction_accepted = sum(
+        item.valid_output and item.semantic_match is True for item in extraction[:5]
+    )
+    extraction_errors_detected = sum(
+        item.semantic_match is not True for item in extraction[5:]
+    )
+    hard_accepted = sum(
+        item.valid_output and item.semantic_match is True for item in hard[:6]
+    )
+    hard_errors_detected = sum(item.semantic_match is not True for item in hard[6:])
+    semantic_accepted = sum(
+        item.valid_output and item.semantic_match is True for item in semantic
+    )
+    trajectory_scenarios = trajectory[:6]
+    trajectory_controls = trajectory[6:]
+    trajectory_satisfied = sum(
         not check_outcome(result, expected) and not check_trajectory(result, event_names)
-        for _, result, expected, event_names in trajectory
+        for _, result, expected, event_names in trajectory_scenarios
+    )
+    trajectory_controls_detected = sum(
+        bool(check_outcome(result, expected) or check_trajectory(result, event_names))
+        for _, result, expected, event_names in trajectory_controls
     )
     return {
         "computed_now_offline": True,
         "items": [
-            {"label": "Extraction contract + validation", "result": f"{sum(x.valid_output and x.semantic_match is True for x in extraction)}/{len(extraction)} pass"},
-            {"label": "Hard extraction cases", "result": f"{sum(x.valid_output and x.semantic_match is True for x in hard)}/{len(hard)} pass"},
-            {"label": "Semantic robustness", "result": f"{sum(x.valid_output and x.semantic_match is True for x in semantic)}/{len(semantic)} pass"},
-            {"label": "Outcome vs trajectory + authorization controls + safe stops", "result": f"{trajectory_passes}/{len(trajectory)} pass"},
+            {
+                "label": "Extraction controls",
+                "result": f"{extraction_accepted + extraction_errors_detected}/{len(extraction)} behaved as expected",
+                "breakdown": [
+                    f"{extraction_accepted}/{len(extraction[:5])} correct outputs accepted",
+                    f"{extraction_errors_detected}/{len(extraction[5:])} invalid or incorrect outputs detected",
+                ],
+            },
+            {
+                "label": "Hard extraction controls",
+                "result": f"{hard_accepted + hard_errors_detected}/{len(hard)} behaved as expected",
+                "breakdown": [
+                    f"{hard_accepted}/{len(hard[:6])} correct outputs accepted",
+                    f"{hard_errors_detected}/{len(hard[6:])} semantic errors detected",
+                ],
+            },
+            {
+                "label": "Semantic robustness",
+                "result": f"{semantic_accepted}/{len(semantic)} behaved as expected",
+                "breakdown": [f"{semantic_accepted}/{len(semantic)} meaning-preserving variants accepted"],
+            },
+            {
+                "label": "Trajectory, authorization, and safe-stop controls",
+                "result": f"{trajectory_satisfied + trajectory_controls_detected}/{len(trajectory)} behaved as expected",
+                "breakdown": [
+                    f"{trajectory_satisfied}/{len(trajectory_scenarios)} valid scenario outcomes and trajectories satisfied",
+                    f"{trajectory_controls_detected}/{len(trajectory_controls)} deliberately invalid trajectories rejected",
+                ],
+            },
         ],
         "note": "These are deterministic offline checks computed in-process; no live evaluation or full unit-test subprocess runs here.",
     }
+
+
+def _decision_timeline(
+    extraction_result: ExtractionResult,
+    trace_rows: list[dict[str, object]],
+    final: dict[str, object],
+) -> list[dict[str, str]]:
+    """Summarize observed milestones without adding unrecorded model reasoning."""
+    events = {str(row["event"]) for row in trace_rows}
+    items = [{"label": "Customer message received", "evidence": "captured model request"}]
+    if extraction_result.trace.validation_succeeded:
+        items.append({"label": "Extraction validated", "evidence": "ExtractionResult"})
+    if {"linkage_completed", "shipment_attached", "carrier_evidence_attached"} <= events:
+        items.append({"label": "Order and shipment evidence retrieved", "evidence": "workflow trace"})
+    if any(
+        row["event"] == "policy_route_recorded"
+        and row["status"] == "proceed_to_disposition"
+        for row in trace_rows
+    ):
+        items.append({"label": "Policy allowed disposition", "evidence": "workflow trace"})
+    if "disposition_selected" in events and final["disposition"] == "approve_refund":
+        items.append({"label": "Refund approved", "evidence": "workflow state"})
+    if "execution_authority_granted" in events:
+        items.append({"label": "Authority granted", "evidence": "workflow trace"})
+    if "execution_result_recorded" in events:
+        outcome = "succeeded" if final["execution_status"] == "succeeded" else "failed"
+        items.append({"label": f"Refund execution {outcome}", "evidence": "workflow trace"})
+    if "execution_failure_routed" in events:
+        items.append({"label": "Failure routed to human review", "evidence": "workflow trace"})
+    if final["closed"]:
+        items.append({"label": "Case closed", "evidence": "final workflow state"})
+    else:
+        items.append({"label": "Case remained open", "evidence": "final workflow state"})
+    return items
 
 
 def run_demo(scenario_id: str) -> dict[str, object]:
@@ -155,6 +239,8 @@ def run_demo(scenario_id: str) -> dict[str, object]:
     policy = case.policy_evaluation_results[-1]
     authority = next(row for row in trace_rows if row["step"] == "authority")
     operation = workflow.execution_operation
+    final = _state(case.snapshot())
+    assert final is not None
     return {
         "scenario": {"id": scenario_id, "title": scenario.title, "description": scenario.description},
         "honesty": ["Extraction is scripted/offline in this demo.", "It uses the same ModelClient boundary as the real Anthropic adapter.", "Synthetic evidence and adapters stand in for retailer systems; this is not a production retailer integration.", "The customer message is fixed by the selected scenario and is not presented as arbitrary LLM interpretation."],
@@ -163,12 +249,13 @@ def run_demo(scenario_id: str) -> dict[str, object]:
         "structured_extraction": _extraction(extraction_result.extraction),
         "validation": {"status": extraction_result.status.value, "parsing_succeeded": extraction_result.trace.parsing_succeeded, "validation_succeeded": extraction_result.trace.validation_succeeded, "reason": extraction_result.validation_reason},
         "intake_route": routed.route.value,
-        "state": {"final": _state(case.snapshot()), "completed": workflow.completed, "failure_stage": workflow.failure_stage, "failure_reason": workflow.failure_reason, "transitions": transitions},
+        "state": {"final": final, "completed": workflow.completed, "failure_stage": workflow.failure_stage, "failure_reason": workflow.failure_reason, "transitions": transitions},
         "evidence": evidence,
         "policy": {"route": policy.route.value, "reasons": list(policy.reasons), "unresolved_policies": [x.value for x in policy.unresolved_policies]},
         "disposition": workflow.final_disposition.value,
         "authorization": authority,
         "execution": None if operation is None else {"operation_id": operation.operation_id, "idempotency_key": operation.idempotency_key, "status": operation.status.value, "attempt_count": operation.attempt_count, "result_detail": operation.result_detail},
         "human_review": {"required": case.case_status.value == "human_review", "requests": len(case.human_review_requests), "decisions": len(case.human_review_decisions)},
+        "decision_timeline": _decision_timeline(extraction_result, trace_rows, final),
         "trace_rows": trace_rows, "eval_evidence": eval_evidence(),
     }
