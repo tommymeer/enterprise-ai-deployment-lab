@@ -733,8 +733,8 @@ class SupportCaseTest(unittest.TestCase):
         result = self.evaluation(recorded_unknown)
 
         self.assertTrue(recorded_unknown.address_match_recorded)
-        self.assertEqual(result.route, PolicyRoute.PROCEED_TO_DISPOSITION)
-        self.assertIn("address result recorded: unknown", result.evidence_summary)
+        self.assertEqual(result.route, PolicyRoute.REQUEST_MORE_INFORMATION)
+        self.assertIn("customer-confirmed delivery address", result.reasons[0])
 
     def test_invalid_address_match_is_audited_without_changing_case(self) -> None:
         case = SupportCase("case-001")

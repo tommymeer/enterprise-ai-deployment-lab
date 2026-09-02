@@ -1,7 +1,10 @@
 import json, os, unittest
 from pathlib import Path
 from unittest.mock import patch
-from support_agent.demo import demo_options, eval_evidence, run_demo
+from support_agent.demo import (SYNTHETIC_CUSTOMER_CONFIRMED_ADDRESSES, demo_options,
+    eval_evidence, run_demo)
+from support_agent import AddressMatchResult, DeterministicAddressComparison, OrderReference, RetrievalStatus, MatchStatus, SyntheticSupportCaseInput
+from datetime import UTC, datetime
 from support_agent.modeling import ModelResponse
 
 class FakeLiveClient:
@@ -34,7 +37,18 @@ class DemoViewTests(unittest.TestCase):
     def test_failure_trace_passes_authority_then_routes_review(self):
         trace=run_demo("refund-execution-failure")["execution_trace"]; names=[x["component"] for x in trace]
         self.assertLess(names.index("refund_authority"),names.index("execution_adapter")); self.assertLess(names.index("execution_adapter"),names.index("human_review_router"))
-        self.assertEqual(next(x for x in trace if x["component"]=="execution_adapter")["status"],"Failed")
+        execution=next(x for x in trace if x["component"]=="execution_adapter")
+        self.assertEqual(execution["status"],"Failed")
+        self.assertTrue(execution["state_changed"])
+        self.assertEqual(execution["state_before"]["execution_status"],"in_progress")
+        self.assertEqual(execution["state_after"]["execution_status"],"failed")
+        self.assertFalse(execution["state_after"]["closed"])
+
+    def test_cards_without_grouped_state_transition_do_not_claim_one(self):
+        row=next(x for x in run_demo("refund-success")["execution_trace"] if x["component"]=="order_lookup")
+        self.assertFalse(row["state_changed"])
+        self.assertIsNone(row["state_before"])
+        self.assertIsNone(row["state_after"])
 
     def test_offline_mode_is_locked_and_labeled(self):
         options=demo_options()
@@ -93,7 +107,7 @@ class DemoViewTests(unittest.TestCase):
         self.assertEqual(carrier["input"]["shipment_id"],"retailer-shipment-1003")
         self.assertFalse(carrier["output"]["evidence_present"])
         authority=next(x for x in over_limit["execution_trace"] if x["component"]=="refund_authority")
-        self.assertEqual(authority["output"]["decision"],"blocked")
+        self.assertEqual(authority["output"]["authorization"],"blocked")
         self.assertEqual(authority["technical_details"][0]["state_after"]["case_status"],"human_review")
         self.assertEqual(over_limit["customer_outcome"]["title"],"Escalated for authorized review")
 
@@ -111,7 +125,7 @@ class DemoViewTests(unittest.TestCase):
         self.assertEqual([x["category"] for x in view["execution_trace"]],["MODEL","VALIDATION"])
 
     def test_readable_trace_results_are_strings_and_json_is_collapsed(self):
-        trace=run_demo("refund-success")["execution_trace"]
+        view=run_demo("refund-success"); trace=view["execution_trace"]
         self.assertTrue(all(isinstance(x["result"],str) and x["result"] for x in trace))
         self.assertEqual(next(x for x in trace if x["component"]=="order_lookup")["result"],"Order 12345 found")
         self.assertEqual(sum(x["component"]=="execution_adapter" for x in trace),1)
@@ -119,12 +133,58 @@ class DemoViewTests(unittest.TestCase):
         action=next(x for x in trace if x["component"]=="execution_adapter")
         self.assertEqual([x["event"] for x in action["technical_details"]],
             ["tool_called","tool_returned","execution_result_recorded"])
-        raw=trace[-1]["technical_details"][-1]["raw_workflow_trace"]
+        raw=view["raw_workflow_trace"]
         self.assertIn("workflow_started",[x["event"] for x in raw])
         self.assertIn("workflow_completed",[x["event"] for x in raw])
         source=(Path(__file__).parents[1]/"src/support_agent/demo_static/index.html").read_text()
-        self.assertIn('Result:</b> ${esc(row.result)}',source)
+        self.assertIn('function readableFields(fields)',source)
+        self.assertIn('row.display_input',source)
+        self.assertIn('Raw input and result',source)
         self.assertNotIn('<b>Result</b><pre>',source)
+        self.assertNotIn('Next:',source)
+
+    def test_carrier_picture_proof_summary_uses_independent_source_field(self):
+        with_picture=self.run_live_order("12345")
+        without_picture=self.run_live_order("24680")
+        carrier=lambda view: next(x for x in view["execution_trace"] if x["component"]=="carrier_lookup")
+        self.assertEqual(carrier(with_picture)["result"],"Delivered event found · picture proof available")
+        self.assertEqual(carrier(without_picture)["result"],"Delivered event found · no picture proof available")
+
+    def test_raw_trace_is_separate_complete_and_ordered(self):
+        view=run_demo("refund-success"); raw=view["raw_workflow_trace"]
+        self.assertEqual([x["sequence"] for x in raw],list(range(len(raw))))
+        self.assertEqual(raw[0]["event"],"budget_initialized")
+        self.assertEqual(raw[-1]["event"],"workflow_completed")
+        self.assertFalse(any("raw_workflow_trace" in detail for row in view["execution_trace"] for detail in row["technical_details"]))
+
+    def test_interactive_disposition_is_explained_as_evidence_derived(self):
+        row=next(x for x in run_demo("refund-success")["execution_trace"] if x["component"]=="resolution_selector")
+        self.assertEqual(row["output"]["disposition"],"approve_refund")
+        self.assertEqual(row["output"]["facts_consumed"]["carrier_delivery_status"],"delivered")
+        self.assertIn("complete evidence",row["output"]["rule"])
+
+    def test_real_address_comparison_match_mismatch_and_missing(self):
+        now=datetime(2026,9,1,tzinfo=UTC)
+        order=OrderReference("retailer-order-1",MatchStatus.MATCHED,"42.00 USD","apparel","42 Synthetic Market St",now,RetrievalStatus.SUCCESS)
+        make=lambda address:SyntheticSupportCaseInput("case-1","message","customer-1","42","shipment-1","agent",now,address)
+        compare=DeterministicAddressComparison()
+        self.assertIs(compare(make("42 synthetic market st."),order),AddressMatchResult.MATCH)
+        self.assertIs(compare(make("99 Different Road"),order),AddressMatchResult.MISMATCH)
+        self.assertIs(compare(make(None),order),AddressMatchResult.UNKNOWN)
+
+    def test_demo_address_uses_independent_support_channel_fixture(self):
+        self.assertEqual(SYNTHETIC_CUSTOMER_CONFIRMED_ADDRESSES["24680"], "42 Synthetic Market St")
+        view=self.run_live_order("24680")
+        row=next(x for x in view["execution_trace"] if x["component"]=="address_comparison")
+        self.assertEqual(row["result"], "Customer-confirmed address matches order shipping address")
+        self.assertEqual(row["input"]["customer_confirmed_support_channel_address"], "value present")
+        self.assertEqual(row["input"]["retailer_order_shipping_address"], "value present")
+
+    def test_demo_validation_checks_only_report_recorded_trace_evidence(self):
+        checks=run_demo("refund-success")["model"]["validation"]["named_checks"]
+        self.assertEqual(checks, {"schema_parse_valid": True, "structured_extraction_valid": True})
+        self.assertNotIn("missing_required_fields_consistent", checks)
+        self.assertNotIn("clarification_fields_consistent", checks)
 
     def test_model_row_exposes_available_per_call_usage_metadata(self):
         message="Order 12345 says delivered but I never got it."
@@ -139,11 +199,19 @@ class DemoViewTests(unittest.TestCase):
         self.assertNotIn("estimated_model_cost",model_call)
 
     def test_eval_examples_are_existing_fixtures(self):
-        evidence=eval_evidence(); self.assertEqual([x["source"] for x in evidence["examples"]],["extraction fixture: complete-order","extraction fixture: invented-order","trajectory fixture: correct_outcome_execution_before_disposition"]); self.assertTrue(all(x["passed"] for x in evidence["examples"]))
+        evidence=eval_evidence()
+        self.assertEqual([x["title"] for x in evidence["coverage"]],["Extraction correctness","Semantic robustness","Grounding / hallucination control","Trajectory correctness","Authorization safety","Failure handling","Idempotency"])
+        self.assertTrue(all(x["passed"] for x in evidence["coverage"]))
+        self.assertEqual([x["source"] for x in evidence["examples"]],["extraction fixture: complete-order","extraction fixture: invented-order","trajectory fixture: correct_outcome_execution_before_disposition","trajectory fixture: over_limit_refund"])
+        self.assertTrue(all(x["passed"] for x in evidence["examples"]))
+        trajectory=next(x for x in evidence["examples"] if x["title"]=="Trajectory control")
+        self.assertEqual(trajectory["actual"]["outcome_failures"],[])
+        self.assertEqual(trajectory["actual"]["trajectory_failures"],["disposition must occur before execution_started"])
+        self.assertIn("offline",evidence["note"])
 
     def test_removed_sections_are_not_rendered(self):
         source=(Path(__file__).parents[1]/"src/support_agent/demo_static/index.html").read_text()
         for removed in ("System pipeline","Decision timeline","Technical case details","Implementation map"): self.assertNotIn(removed,source)
-        self.assertIn("Execution trace",source); self.assertIn("How I evaluated this system",source); self.assertNotIn("setTimeout",source)
+        self.assertIn("Execution trace",source); self.assertIn("Evaluation coverage",source); self.assertIn("Representative examples",source); self.assertNotIn("setTimeout",source)
 
 if __name__=="__main__": unittest.main()

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Mapping
 
-from .domain import AddressMatchResult, CarrierEvidenceSnapshot, MatchStatus, OrderReference, RetrievalStatus, ShipmentReference
+from .domain import CarrierEvidenceSnapshot, MatchStatus, OrderReference, RetrievalStatus, ShipmentReference
 
 _RETRIEVED_AT = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 
@@ -15,10 +15,10 @@ _RETRIEVED_AT = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 @dataclass(frozen=True, slots=True)
 class SyntheticRetailerRecord:
     customer_order_id: str
+    customer_id: str
     order: OrderReference
     shipment: ShipmentReference
     carrier_evidence: CarrierEvidenceSnapshot | None
-    address_match: AddressMatchResult
     refund_amount_minor: int
 
 
@@ -31,10 +31,10 @@ def _record(customer_order_id: str, suffix: str, order_value: str, item_category
     snapshot = None if not evidence else CarrierEvidenceSnapshot(
         f"carrier-evidence-{suffix}", shipment_id, "delivered", _RETRIEVED_AT,
         ("out_for_delivery", "delivered"), picture_proof, _RETRIEVED_AT, RetrievalStatus.SUCCESS)
-    return SyntheticRetailerRecord(customer_order_id,
+    return SyntheticRetailerRecord(customer_order_id, f"customer-{suffix}",
         OrderReference(order_id, MatchStatus.MATCHED, order_value, item_category,
             "42 Synthetic Market St", _RETRIEVED_AT, RetrievalStatus.SUCCESS),
-        shipment, snapshot, AddressMatchResult.MATCH, refund_amount_minor)
+        shipment, snapshot, refund_amount_minor)
 
 
 _RECORDS = (

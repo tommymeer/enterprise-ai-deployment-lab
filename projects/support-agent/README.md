@@ -88,12 +88,17 @@ refund. Parsed model output must pass schema, consistency, and grounding checks 
 2. The model extracts the issue type and supplied order/tracking identifiers into the nine-field
    extraction contract.
 3. The intake router validates the extraction and creates the trusted workflow input.
-4. Synthetic adapters retrieve and link customer, order, shipment, carrier, and address evidence.
-5. Deterministic policy evaluates evidence, and disposition selects the resolution.
+4. Synthetic adapters retrieve customer, order, shipment, and carrier facts; the orchestrator links
+   them into case state and compares support-channel address context with the order address.
+5. A deterministic structural gate checks completeness, then a small retailer rule derives the
+   interactive disposition from issue type, delivery status, and address result.
 6. Authorization compares the refund action, amount, and currency with the configured authority.
 7. Execution uses a stable operation identity; a successful refund updates execution and closure
    state.
 8. The trace records ordered state changes and sanitized tool call/return metadata.
+
+The lab keeps case state, the execution operation ledger, and trace events in memory. Production
+would durably persist all three; no database is implied by the demo.
 
 ## Failure and safety behavior
 
@@ -158,9 +163,10 @@ source .venv/bin/activate
 ```
 
 The browser demo is organized around one customer message, a deterministic customer-facing outcome,
-and one readable execution trace. Its expandable evidence exposes the model request/response,
-validated extraction, actual synthetic adapter names and payloads, policy and authority inputs,
-state changes, latency/retries, and operation identity. The implementation remains split across
+and one readable execution trace. Meaningful state transitions are distinct from read-only tool
+calls; relevant details expand per step, while the complete append-only raw trace has its own
+collapsed view. The demo exposes named validation checks, structural-gate and retailer-disposition
+inputs, authority inputs, and operation identity. The implementation remains split across
 `demo.py` (composition/view model), `demo_server.py` and `demo_static/index.html` (localhost UI),
 `modeling.py` / `anthropic_adapter.py` (model boundary), `extraction.py` (validation), `workflow.py`
 (orchestration/tools), `domain.py` (state), `execution.py` (idempotency), and `tracing.py` (events).

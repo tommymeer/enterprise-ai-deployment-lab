@@ -73,6 +73,7 @@ class SyntheticSupportCaseInput:
     shipment_identifier: str
     actor: str
     received_at: datetime
+    customer_confirmed_delivery_address: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -85,6 +86,8 @@ class SyntheticSupportCaseInput:
         ):
             _non_empty(getattr(self, field_name), field_name)
         _utc(self.received_at, "received_at")
+        if self.customer_confirmed_delivery_address is not None:
+            _non_empty(self.customer_confirmed_delivery_address, "customer_confirmed_delivery_address")
 
 
 class IntakeRoute(StrEnum):
@@ -101,6 +104,7 @@ class TrustedIntakeContext:
     shipment_identifier: str
     actor: str
     received_at: datetime
+    customer_confirmed_delivery_address: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -111,6 +115,8 @@ class TrustedIntakeContext:
         ):
             _non_empty(getattr(self, field_name), field_name)
         _utc(self.received_at, "received_at")
+        if self.customer_confirmed_delivery_address is not None:
+            _non_empty(self.customer_confirmed_delivery_address, "customer_confirmed_delivery_address")
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +319,23 @@ class SyntheticAddressComparison:
 
 
 @dataclass(frozen=True, slots=True)
+class DeterministicAddressComparison:
+    """Compare support-channel address context with the retailer order fact."""
+
+    @staticmethod
+    def _normalize(value: str) -> str:
+        return " ".join("".join(character.lower() if character.isalnum() else " " for character in value).split())
+
+    def __call__(self, case_input: SyntheticSupportCaseInput, order: OrderReference) -> AddressMatchResult:
+        claimed = case_input.customer_confirmed_delivery_address
+        trusted = order.ship_to_address_on_file
+        if not claimed or not trusted:
+            return AddressMatchResult.UNKNOWN
+        return (AddressMatchResult.MATCH if self._normalize(claimed) == self._normalize(trusted)
+                else AddressMatchResult.MISMATCH)
+
+
+@dataclass(frozen=True, slots=True)
 class SyntheticExecutionAdapter:
     refund: ExecutionResult
     replacement: ExecutionResult
@@ -412,6 +435,7 @@ class WorkflowConfiguration:
     retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY
     backoff_sleep: Callable[[float], None] = _no_backoff_sleep
     tool_estimated_cost_usd: Mapping[str, float] = field(default_factory=dict)
+    derive_retailer_disposition: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -494,6 +518,8 @@ class WorkflowConfiguration:
             if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:
                 raise ValueError("tool estimated costs must be non-negative")
         object.__setattr__(self, "tool_estimated_cost_usd", MappingProxyType(costs))
+        if type(self.derive_retailer_disposition) is not bool:
+            raise ValueError("derive_retailer_disposition must be a bool")
 
 
 def _result(
@@ -842,7 +868,7 @@ def _run_synthetic_support_case(
             lambda: case.record_customer_report(
                 CustomerReport(
                     case_input.order_identifier,
-                    "synthetic address supplied through configured comparison",
+                    case_input.customer_confirmed_delivery_address or "not supplied",
                     case_input.customer_message,
                     "synthetic recipient check not specified",
                     case_input.received_at,
@@ -1069,7 +1095,9 @@ def _run_synthetic_support_case(
         address_result = tool_call(
             "address_comparison",
             "synthetic_address_comparison",
-            {"case_id": case.case_id, "order_id": order.ref_id},  # type: ignore[union-attr]
+            {"case_id": case.case_id, "internal_order_id": order.ref_id,
+             "customer_confirmed_support_channel_address": "value present" if case_input.customer_confirmed_delivery_address else "missing",
+             "retailer_order_shipping_address": "value present" if order.ship_to_address_on_file else "missing"},  # type: ignore[union-attr]
             lambda: configuration.address_comparison(case_input, order),  # type: ignore[arg-type]
             lambda value: {"match_result": value.value},
         )
@@ -1159,13 +1187,33 @@ def _run_synthetic_support_case(
             final_outcome=decision.disposition.value,
         )
     else:
+        selected_disposition = configuration.selected_disposition
+        disposition_arguments = {}
+        disposition_detail = "configured regression disposition"
+        if configuration.derive_retailer_disposition:
+            delivered = bool(case.carrier_evidence_snapshots) and all(
+                item.retrieval_status is RetrievalStatus.SUCCESS and item.delivery_status == "delivered"
+                for item in case.carrier_evidence_snapshots
+            )
+            selected_disposition = (Disposition.APPROVE_REFUND
+                if delivered and case.address_match_result is AddressMatchResult.MATCH
+                else Disposition.REQUEST_MORE_INFO)
+            disposition_arguments = {
+                "issue_type": "delivered_not_received",
+                "structural_gate": evaluation.route.value,
+                "carrier_delivery_status": case.carrier_evidence_snapshots[-1].delivery_status if case.carrier_evidence_snapshots else None,
+                "address_match_result": case.address_match_result.value,
+            }
+            disposition_detail = "rule: delivered_not_received + complete evidence + delivered + address match => refund"
         change(
             "disposition",
             "disposition_selected",
             lambda: case.select_disposition(
-                configuration.selected_disposition, actor=case_input.actor
+                selected_disposition, actor=case_input.actor
             ),
-            final_outcome=configuration.selected_disposition.value,
+            final_outcome=selected_disposition.value,
+            tool_arguments=disposition_arguments,
+            detail=disposition_detail,
         )
 
     if case.case_status is not CaseStatus.EXECUTING:
@@ -1201,6 +1249,16 @@ def _run_synthetic_support_case(
                 ),
                 escalation=True,
                 detail=detail,
+                tool_arguments={
+                    "refund_amount_minor": configuration.proposed_refund_amount_minor,
+                    "amount_source": "matched synthetic retailer record",
+                    "currency": configuration.proposed_refund_currency,
+                    "autonomous_limit_minor": configuration.autonomous_refund_limit_minor,
+                    "autonomous_limit_currency": configuration.autonomous_refund_limit_currency,
+                    "limit_source": "workflow configuration",
+                    "currency_match": currencies_match,
+                    "amount_within_limit": False,
+                },
             )
             record(
                 "workflow",
@@ -1226,9 +1284,13 @@ def _run_synthetic_support_case(
             "execution_authority_granted",
             tool_arguments={
                 "refund_amount_minor": configuration.proposed_refund_amount_minor,
+                "amount_source": "matched synthetic retailer record",
                 "currency": configuration.proposed_refund_currency,
                 "autonomous_limit_minor": configuration.autonomous_refund_limit_minor,
                 "autonomous_limit_currency": configuration.autonomous_refund_limit_currency,
+                "limit_source": "workflow configuration",
+                "currency_match": currencies_match,
+                "amount_within_limit": within_limit,
             },
             evaluation_result="granted",
         )
@@ -1336,13 +1398,16 @@ def _run_synthetic_support_case(
                     "case_id": case.case_id,
                     "disposition": case.disposition.value,
                     "idempotency_key": idempotency_key,
+                    "target_order_reference": order.ref_id,
+                    "refund_amount_minor": configuration.proposed_refund_amount_minor,
+                    "currency": configuration.proposed_refund_currency,
                 },
                 lambda: configuration.execution(
                     idempotency_key, case.disposition, case
                 ),
                 lambda value: {
                     "succeeded": value.succeeded,
-                    "detail_present": bool(value.detail),
+                    "outcome_detail": value.detail,
                 },
                 before_attempt=start_execution_attempt,
                 after_failure=fail_execution_attempt,
@@ -1577,6 +1642,7 @@ def route_customer_message_extraction(
             shipment_identifier=trusted_context.shipment_identifier,
             actor=trusted_context.actor,
             received_at=trusted_context.received_at,
+            customer_confirmed_delivery_address=trusted_context.customer_confirmed_delivery_address,
         ),
         configuration,
     )

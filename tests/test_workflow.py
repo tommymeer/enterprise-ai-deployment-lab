@@ -626,9 +626,13 @@ class WorkflowTest(unittest.TestCase):
                     dict(granted.tool_arguments),
                     {
                         "refund_amount_minor": amount,
+                        "amount_source": "matched synthetic retailer record",
                         "currency": "USD",
                         "autonomous_limit_minor": 10_000,
                         "autonomous_limit_currency": "USD",
+                        "limit_source": "workflow configuration",
+                        "currency_match": True,
+                        "amount_within_limit": True,
                     },
                 )
 

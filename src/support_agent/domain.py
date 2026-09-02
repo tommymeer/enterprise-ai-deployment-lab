@@ -1148,6 +1148,8 @@ def evaluate_synthetic_structural_policy(
             evidence_summary.append("carrier evidence retrieval succeeded")
     if not case.address_match_recorded:
         missing.append("address result")
+    elif case.address_match_result is AddressMatchResult.UNKNOWN:
+        missing.append("customer-confirmed delivery address")
     elif case.address_match_result is AddressMatchResult.MISMATCH:
         evidence_summary.append("address mismatch recorded")
     else:
