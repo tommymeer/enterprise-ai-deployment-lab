@@ -53,12 +53,31 @@ class DemoViewTests(unittest.TestCase):
     def test_offline_mode_is_locked_and_labeled(self):
         options=demo_options()
         self.assertFalse(options["modes"][0]["message_editable"]); self.assertEqual(options["default_mode"],"scripted")
+        self.assertEqual(options["modes"][1]["label"],"Live — Claude extraction (server disabled)")
         self.assertEqual([x["title"] for x in options["scenarios"]],
-            ["Normal execution","Inject refund execution failure"])
+            ["Normal","Order not found","Carrier evidence unavailable",
+             "Refund exceeds autonomous authority","Refund execution failure"])
         self.assertEqual([x["order_id"] for x in options["synthetic_order_examples"]],
             ["12345","24680","31415","27182"])
         self.assertEqual(run_demo("refund-success")["mode"]["label"],"Scripted extraction")
         with self.assertRaisesRegex(ValueError,"locked scenario fixture"): run_demo("refund-success","different words")
+
+    def test_demo_paths_project_existing_safe_outcomes(self):
+        expected = {
+            "normal": ("closed", "succeeded"),
+            "order-not-found": ("awaiting_customer_action", "not_applicable"),
+            "carrier-evidence-unavailable": ("awaiting_customer_action", "not_applicable"),
+            "refund-exceeds-authority": ("human_review", "not_started"),
+            "refund-execution-failure": ("human_review", "failed"),
+        }
+        for path, final_state in expected.items():
+            with self.subTest(path=path):
+                view = run_demo(path)
+                self.assertEqual(
+                    (view["final_state"]["case_status"], view["final_state"]["execution_status"]),
+                    final_state,
+                )
+                self.assertIn("run_summary", view)
 
     def test_live_enabled_options_default_to_editable_live_mode(self):
         options=demo_options(live_enabled=True)
@@ -137,11 +156,27 @@ class DemoViewTests(unittest.TestCase):
         self.assertIn("workflow_started",[x["event"] for x in raw])
         self.assertIn("workflow_completed",[x["event"] for x in raw])
         source=(Path(__file__).parents[1]/"src/support_agent/demo_static/index.html").read_text()
-        self.assertIn('function readableFields(fields)',source)
+        self.assertIn('function traceRow(row)',source)
         self.assertIn('row.display_input',source)
-        self.assertIn('Raw input and result',source)
-        self.assertNotIn('<b>Result</b><pre>',source)
-        self.assertNotIn('Next:',source)
+        self.assertIn('Raw payloads',source)
+        self.assertIn('Logic / decision rule',source)
+        self.assertIn('const rawPayloads=',source)
+        self.assertIn('model_request={task_name:detail.model_request.task_name,prompt_version:detail.model_request.prompt_version,expected_schema_name:detail.model_request.expected_schema_name}',source)
+        self.assertNotIn('concise.model_response',source)
+        self.assertNotIn('Raw input and result',source)
+
+    def test_collapsed_trace_uses_human_statuses_and_keeps_raw_events_technical(self):
+        trace=run_demo("refund-success")["execution_trace"]
+        statuses={row["action"]:row["status"] for row in trace}
+        self.assertEqual(statuses["Customer lookup"],"Matched")
+        self.assertEqual(statuses["Enter evidence gathering"],"Started")
+        self.assertEqual(statuses["Structural evidence gate"],"Passed")
+        self.assertEqual(statuses["Close case"],"Closed")
+        self.assertEqual(next(row for row in trace if row["action"]=="Enter evidence gathering")["technical_details"][0]["event"],"evidence_gathering_entered")
+        source=(Path(__file__).parents[1]/"src/support_agent/demo_static/index.html").read_text()
+        self.assertNotIn("Offline scripted mode is deterministic",source)
+        self.assertIn("raw_trace_events",source)
+        self.assertIn("x.why",source)
 
     def test_carrier_picture_proof_summary_uses_independent_source_field(self):
         with_picture=self.run_live_order("12345")
@@ -201,6 +236,7 @@ class DemoViewTests(unittest.TestCase):
     def test_eval_examples_are_existing_fixtures(self):
         evidence=eval_evidence()
         self.assertEqual([x["title"] for x in evidence["coverage"]],["Extraction correctness","Semantic robustness","Grounding / hallucination control","Trajectory correctness","Authorization safety","Failure handling","Idempotency"])
+        self.assertEqual([x["group"] for x in evidence["coverage"][:3]], ["Extraction behavior"] * 3)
         self.assertTrue(all(x["passed"] for x in evidence["coverage"]))
         self.assertEqual([x["source"] for x in evidence["examples"]],["extraction fixture: complete-order","extraction fixture: invented-order","trajectory fixture: correct_outcome_execution_before_disposition","trajectory fixture: over_limit_refund"])
         self.assertTrue(all(x["passed"] for x in evidence["examples"]))
@@ -208,10 +244,18 @@ class DemoViewTests(unittest.TestCase):
         self.assertEqual(trajectory["actual"]["outcome_failures"],[])
         self.assertEqual(trajectory["actual"]["trajectory_failures"],["disposition must occur before execution_started"])
         self.assertIn("offline",evidence["note"])
+        self.assertTrue(all(item["method"].startswith("Deterministic fixture replay") for item in evidence["coverage"]))
+        self.assertTrue(all(item["why"] for item in evidence["coverage"]))
+        self.assertIn("no retained live-provider performance result",evidence["methodology"]["current"])
+
+    def test_run_summary_labels_grouped_trace_rows_as_displayed_observations(self):
+        summary=run_demo("refund-success")["run_summary"]
+        self.assertIn("displayed_observations",summary)
+        self.assertNotIn("observation_count",summary)
 
     def test_removed_sections_are_not_rendered(self):
         source=(Path(__file__).parents[1]/"src/support_agent/demo_static/index.html").read_text()
         for removed in ("System pipeline","Decision timeline","Technical case details","Implementation map"): self.assertNotIn(removed,source)
-        self.assertIn("Execution trace",source); self.assertIn("Evaluation coverage",source); self.assertIn("Representative examples",source); self.assertNotIn("setTimeout",source)
+        self.assertIn("Runtime trace",source); self.assertIn("Evaluation inspector",source); self.assertIn("System architecture",source); self.assertNotIn("setTimeout",source)
 
 if __name__=="__main__": unittest.main()
