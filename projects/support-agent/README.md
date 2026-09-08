@@ -1,261 +1,125 @@
 # Delivered-Not-Received Support Agent
 
-This project models a retailer's delivered-not-received support workflow: a bounded LLM task turns
-customer language into structured fields, then deterministic code links the case to synthetic
-customer, order, shipment, and carrier evidence; applies policy and a controlled disposition;
-checks execution authority; and either performs an idempotent consequential action or sends the
-case to human review. Explicit state and append-only traces make each decision reconstructable.
-The business context and integrations are synthetic, while the evaluation evidence, economic
-hypothesis, and gated production rollout plan show how the prototype would be tested and introduced
-safely.
+## What this is
 
-## Architecture at a glance
+A synthetic ecommerce support workflow for a customer whose package is marked delivered but cannot be found.
+
+A bounded LLM converts the customer message into a validated schema. Deterministic workflow logic retrieves retailer and carrier evidence, applies a structural evidence gate and disposition rule, checks autonomous authority, and either executes an idempotent refund or escalates safely. Explicit state and append-only tracing make each run inspectable and reconstructable.
+
+Retailer and integration data are synthetic. This is a local lab implementation, not a production deployment.
+
+## What the demo shows
+
+The browser demo is a lightweight trace and evaluation inspector. It presents a customer scenario alongside one end-to-end runtime trace: model call and validation, tools, decisions, authority, execution, state, and expandable technical evidence. It also includes an architecture view, evaluation inspector, and selectable **Demo paths** for:
+
+- Normal autonomous refund
+- Order not found
+- Carrier evidence unavailable
+- Refund exceeding autonomous authority
+- Refund execution failure
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    MESSAGE[Customer message]
-
-    subgraph LLM["LLM boundary — probabilistic"]
-        EXTRACT["Bounded extraction<br/>one model call"]
-    end
-
-    subgraph WORKFLOW["Deterministic workflow boundary"]
-        VALIDATE["Validate structured<br/>extraction contract"]
-        INTAKE[Intake / router]
-        STATE["Explicit case state<br/>in process"]
-        EVIDENCE["Evidence adapters<br/>customer · order · shipment · carrier<br/>+ address comparison"]
-        POLICY[Deterministic policy]
-        DISPOSITION[Disposition]
-        AUTHORIZATION[Authorization]
-        EXECUTION["Execution adapter / consequential API<br/>stable operation identity + idempotency"]
-        REVIEW[Human review]
-        SAFESTOP[Safe stop]
-        FINAL[Final result / case state]
-
-        VALIDATE --> INTAKE --> STATE --> EVIDENCE --> POLICY --> DISPOSITION --> AUTHORIZATION
-        AUTHORIZATION -->|permitted| EXECUTION -->|success| FINAL
-        AUTHORIZATION -->|blocked| REVIEW --> FINAL
-        EXECUTION -->|failure| REVIEW
-        VALIDATE -->|invalid output| SAFESTOP --> FINAL
-        EVIDENCE -->|provider / API failure| SAFESTOP
-    end
-
-    TRACE["Ordered append-only trace / audit history<br/>in process; updated across the case workflow"]
-
-    MESSAGE --> EXTRACT --> VALIDATE
-    STATE -.-> TRACE
+    MESSAGE[Customer message] --> EXTRACT[Bounded LLM extraction]
+    EXTRACT --> VALIDATE[Deterministic validation / routing]
+    VALIDATE --> EVIDENCE[Customer, order, shipment, carrier evidence + address comparison]
+    EVIDENCE --> GATE[Structural evidence gate]
+    GATE --> DISPOSITION[Deterministic disposition]
+    DISPOSITION --> AUTHORIZATION[Authorization]
+    AUTHORIZATION -->|permitted| EXECUTION[Idempotent execution]
+    AUTHORIZATION -->|blocked| REVIEW[Human escalation]
+    EXECUTION -->|success| CLOSE[Closure]
+    EXECUTION -->|failure| REVIEW
+    TRACE[Append-only trace]
+    EXTRACT -.-> TRACE
+    VALIDATE -.-> TRACE
     EVIDENCE -.-> TRACE
-    POLICY -.-> TRACE
     DISPOSITION -.-> TRACE
     AUTHORIZATION -.-> TRACE
     EXECUTION -.-> TRACE
     REVIEW -.-> TRACE
-    SAFESTOP -.-> TRACE
-
-    classDef llm fill:#fff4cc,stroke:#9a6700,stroke-width:2px,color:#24292f;
-    classDef deterministic fill:#ddf4ff,stroke:#0969da,stroke-width:1px,color:#24292f;
-    classDef state fill:#dafbe1,stroke:#1a7f37,stroke-width:2px,color:#24292f;
-    classDef safety fill:#ffebe9,stroke:#cf222e,stroke-width:1px,color:#24292f;
-    class EXTRACT llm;
-    class VALIDATE,INTAKE,EVIDENCE,POLICY,DISPOSITION,AUTHORIZATION,EXECUTION deterministic;
-    class STATE,FINAL,TRACE state;
-    class REVIEW,SAFESTOP safety;
 ```
 
-The prototype supplies the evidence and execution interfaces with deterministic synthetic
-adapters. The Anthropic adapter is used only for the bounded extraction contract; real retailer,
-carrier, support, and refund APIs are production work, not simulated claims of integration.
+This is a modular monolith / local lab implementation, not a microservices design. The deterministic path is: customer message → bounded extraction → validation and routing → evidence retrieval → address comparison → structural gate → disposition → authorization → idempotent execution → closure or human escalation → trace.
 
-## What is AI vs. deterministic
+## AI vs. deterministic
 
-| Layer | AI or deterministic | Why |
-| --- | --- | --- |
-| Customer-message extraction | LLM | Interpret natural language into a fixed, validated schema |
-| Intake and routing | Deterministic | Keep workflow entry and required-state checks predictable |
-| Evidence retrieval | Deterministic adapters | Look up source-of-truth customer, order, shipment, and carrier facts |
-| Policy | Deterministic | Apply explicit business rules to retrieved evidence |
-| Disposition | Deterministic | Select only a controlled resolution |
-| Authorization | Deterministic | Enforce the consequential authority boundary by action, amount, and currency |
-| Execution | Deterministic tool/API call | Make side effects explicit and idempotent |
-| State and tracing | Deterministic | Preserve transitions, tool metadata, outcomes, and safe stops for reconstruction |
+The LLM is used only where natural-language interpretation is needed: turning a customer message into a fixed, validated extraction contract. Deterministic logic owns validation, routing, evidence retrieval, the structural gate and policy, disposition, authorization, execution, state transitions, and tracing.
 
-The model proposes structure; it does not decide policy, grant itself authority, or execute a
-refund. Parsed model output must pass schema, consistency, and grounding checks before routing.
+The model does not decide policy, grant itself authority, or execute a refund.
 
-## End-to-end request path
+## Safety and failure handling
 
-1. A customer reports that an order marked delivered is missing.
-2. The model extracts the issue type and supplied order/tracking identifiers into the nine-field
-   extraction contract.
-3. The intake router validates the extraction and creates the trusted workflow input.
-4. Synthetic adapters retrieve customer, order, shipment, and carrier facts; the orchestrator links
-   them into case state and compares support-channel address context with the order address.
-5. A deterministic structural gate checks completeness, then a small retailer rule derives the
-   interactive disposition from issue type, delivery status, and address result.
-6. Authorization compares the refund action, amount, and currency with the configured authority.
-7. Execution uses a stable operation identity; a successful refund updates execution and closure
-   state.
-8. The trace records ordered state changes and sanitized tool call/return metadata.
+- Invalid or ungrounded model output is rejected before it enters the trusted workflow.
+- An unknown order fails safely; unavailable carrier evidence does not become invented evidence.
+- Amount or currency mismatches and over-limit refunds block autonomous execution.
+- An execution failure preserves the selected disposition and routes the open case to human review.
+- A stable operation identity and execution registry suppress duplicate consequential actions.
 
-The lab keeps case state, the execution operation ledger, and trace events in memory. Production
-would durably persist all three; no database is implied by the demo.
+Implementation and regression detail are linked below rather than duplicated here.
 
-## Failure and safety behavior
+## Evaluation
 
-- A carrier-adapter timeout safe-stops before policy; a valid but missing carrier snapshot routes
-  to customer action without execution. Neither path invents evidence.
-- A supplied order ID that is not found requests correction, then resumes the same case after one
-  corrected identifier.
-- Refund execution failure preserves `approve_refund`, records the failed operation, and routes the
-  open case to human review.
-- A repeated successful operation is suppressed and its prior result is reused instead of calling
-  the execution adapter twice.
-- Missing refund-authority inputs are rejected at configuration; amount or currency mismatches are
-  blocked before an execution operation is created.
-- A $150 approved refund under a $100 autonomous limit keeps the disposition but routes to human
-  review with execution `not_started`.
+The displayed evidence is deterministic, offline synthetic-fixture replay with deterministic validators and graders; it does not report retained live-provider performance. Live model evaluation runners exist separately. The automated suite uses neither an LLM-as-judge nor a human grader.
 
-Timeout, rate-limit, unavailable-service, malformed-result, retry, and execution-budget paths also
-have deterministic failure-injection coverage. These are safe-stop semantics in a local prototype,
-not a claim of production recovery infrastructure.
+- **Extraction behavior:** nine-field contract checks, semantic robustness, and identifier-grounding / hallucination rejection.
+- **Workflow correctness:** outcome evaluation is separate from trajectory evaluation, so a successful result cannot conceal an unsafe action sequence.
+- **Safety / authorization:** negative controls verify that execution cannot precede required decisions or exceed autonomous authority.
+- **Reliability / recovery:** dependency and execution-failure regressions, plus idempotency and duplicate suppression.
 
-## Evaluation evidence
+The full offline suite currently passes **265 tests** and makes no paid model calls.
 
-- **Extraction contract:** exact schema, type, internal-consistency, identifier-grounding, malformed
-  response, and clarification behavior are tested independently.
-- **Hard extraction cases:** difficult syntax, multiple numbers, unsupported issues, invented IDs,
-  wrong types, and contradictory clarification fields probe brittle model behavior.
-- **Semantic robustness:** meaning-preserving wording, fact-order, irrelevant-detail, and verbosity
-  variants are graded by contract semantics rather than one exact phrase.
-- **Workflow evaluation:** final-outcome correctness is separate from trajectory correctness, so a
-  correct refund cannot conceal execution before disposition.
-- **Negative controls:** deliberately bad traces prove the evaluator detects execution before
-  disposition and execution despite insufficient authority.
+## Business case and rollout
 
-The ordinary offline suite currently passes **252 tests** and never makes a paid model call. Live
-Anthropic evaluations are separate, manually confirmed commands because they cost money and are not
-the interview demo path.
+The business case is synthetic and assumption-driven. Its value model compares released support capacity, avoided compensation, possible carrier recovery, and operating cost. The rollout is evidence-gated: discovery → shadow → human-reviewed pilot → limited autonomy → controlled expansion.
 
-## Business and deployment
+See [deployment arithmetic](docs/05-deployment-arithmetic.md) and the [production rollout plan](docs/06-production-rollout.md).
 
-### Economic hypothesis
+## Run locally
 
-The synthetic value model estimates **released support capacity + unnecessary compensation avoided
-+ carrier recovery upside - AI/tool/operating cost**. It keeps carrier recovery at $0 until evidence
-exists, retains residual review/fallback labor, and treats all current business inputs as synthetic
-assumptions rather than realized savings. See
-[deployment arithmetic](docs/05-deployment-arithmetic.md).
-
-### Production rollout
-
-Authority expands only with evidence through **discovery -> shadow mode -> human-reviewed pilot ->
-limited autonomy -> controlled expansion**. Each gate requires the relevant trajectory,
-authorization, recovery, adoption, customer, and business evidence; elapsed time alone never grants
-autonomy. See the [production rollout plan](docs/06-production-rollout.md).
-
-## Demo and how to run
-
-From the repository root, install the project into its local environment:
+From the repository root:
 
 ```bash
 uv sync
 source .venv/bin/activate
 ```
 
-The browser demo is organized around one customer message, a deterministic customer-facing outcome,
-and one readable execution trace. Meaningful state transitions are distinct from read-only tool
-calls; relevant details expand per step, while the complete append-only raw trace has its own
-collapsed view. The demo exposes named validation checks, structural-gate and retailer-disposition
-inputs, authority inputs, and operation identity. The implementation remains split across
-`demo.py` (composition/view model), `demo_server.py` and `demo_static/index.html` (localhost UI),
-`modeling.py` / `anthropic_adapter.py` (model boundary), `extraction.py` (validation), `workflow.py`
-(orchestration/tools), `domain.py` (state), `execution.py` (idempotency), and `tracing.py` (events).
-
-The default mode locks the textarea to the representative fixture and labels extraction as
-scripted; synthetic evidence and execution require no API key and make no paid call:
+Offline (scripted extraction; no API key or paid call):
 
 ```bash
 python -m support_agent.demo_server
 ```
 
-Live Claude extraction is a separate explicit opt-in. It changes only the extraction client, makes
-at most one provider call per run, requires `ANTHROPIC_API_KEY`, and never falls back to scripted
-output. Starting it does not itself make a call; pressing **Run case** does and therefore requires
-the paid-call approval described in `AGENTS.md`:
+Live-enabled (explicit opt-in):
 
 ```bash
 python -m support_agent.demo_server --enable-live
 ```
 
-### Try the demo
-
-Start the live-enabled server and open the localhost URL it prints:
-
-```bash
-python -m support_agent.demo_server --enable-live
-```
-
-Live Claude runs require `ANTHROPIC_API_KEY`; select **Offline — scripted extraction** to use the
-locked, no-provider-call fixture instead.
-
-| Order ID | Path |
-| --- | --- |
-| `12345` | Autonomous refund success |
-| `24680` | Autonomous refund success with different retailer/carrier data |
-| `31415` | Missing carrier evidence; further evidence required |
-| `27182` | Refund approved in principle but blocked by autonomous authority limit |
-| Unknown ID | Order not found; no refund executed |
-
-Set **Execution mode** to **Inject refund execution failure** with a supported refund-eligible order
-to test downstream execution failure. Unknown IDs fail safely and never map to a fabricated record.
-
-Run the offline tests and evaluations with:
+Live mode requires `ANTHROPIC_API_KEY` and calls the provider only when **Run case** is selected. Keep the key in an untracked `.env` (copy from `.env.example`) and follow the paid-call approval and cost-reporting requirements in [`AGENTS.md`](../../AGENTS.md). Routine offline tests remain separate:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-The live Anthropic adapter reads `ANTHROPIC_API_KEY` from the environment. If you later run an
-explicitly approved paid evaluation, copy `.env.example` to the untracked `.env`, put the key only
-there, and load it into the current shell:
+## Deep dive
 
-```bash
-cp .env.example .env
-# Edit .env locally; never commit or paste the key into source, docs, fixtures, logs, or screenshots.
-set -a
-source .env
-set +a
-```
-
-Live runners require their explicit confirmation flag and remain outside routine tests. Follow the
-repository's paid-call approval and cost-reporting rules before using one.
-
-## Where to look
-
-| Question | Evidence in the repo |
+| Topic | Evidence |
 | --- | --- |
-| Business problem / current workflow | [`01-business-context.md`](docs/01-business-context.md), [`02-current-workflow.md`](docs/02-current-workflow.md) |
-| Architecture / authority boundaries | [`03-system-boundaries.md`](docs/03-system-boundaries.md) |
-| Design tradeoffs and repairs | [`04-decision-log.md`](docs/04-decision-log.md) |
-| Model adapter | [`anthropic_adapter.py`](../../src/support_agent/anthropic_adapter.py), [`modeling.py`](../../src/support_agent/modeling.py) |
-| Extraction contract and validation | [`extraction.py`](../../src/support_agent/extraction.py) |
-| Intake, adapters, policy flow, and authorization | [`workflow.py`](../../src/support_agent/workflow.py), [`domain.py`](../../src/support_agent/domain.py) |
-| Idempotent execution | [`execution.py`](../../src/support_agent/execution.py) |
-| State and traces | [`domain.py`](../../src/support_agent/domain.py), [`tracing.py`](../../src/support_agent/tracing.py) |
-| Failure handling and budgets | [`failures.py`](../../src/support_agent/failures.py), [`budgets.py`](../../src/support_agent/budgets.py), [`test_workflow.py`](../../tests/test_workflow.py) |
-| Extraction and robustness evals | [`extraction_evaluation.py`](../../src/support_agent/extraction_evaluation.py), [`test_extraction_evaluation.py`](../../tests/test_extraction_evaluation.py), [`test_semantic_robustness_evaluation.py`](../../tests/test_semantic_robustness_evaluation.py) |
-| Outcome / trajectory evals | [`trajectory_evaluation.py`](../../src/support_agent/trajectory_evaluation.py), [`test_trajectory_evaluation.py`](../../tests/test_trajectory_evaluation.py) |
-| Demo entry point | [`demo_server.py`](../../src/support_agent/demo_server.py), [`demo.py`](../../src/support_agent/demo.py) |
-| Economic model | [`05-deployment-arithmetic.md`](docs/05-deployment-arithmetic.md) |
-| Safe rollout | [`06-production-rollout.md`](docs/06-production-rollout.md) |
+| Business context and workflow | [business context](docs/01-business-context.md), [current workflow](docs/02-current-workflow.md) |
+| System boundaries and design tradeoffs | [system boundaries](docs/03-system-boundaries.md), [decision log](docs/04-decision-log.md) |
+| Extraction and model boundary | [`extraction.py`](../../src/support_agent/extraction.py), [`modeling.py`](../../src/support_agent/modeling.py), [`anthropic_adapter.py`](../../src/support_agent/anthropic_adapter.py) |
+| Workflow, domain state, and synthetic evidence | [`workflow.py`](../../src/support_agent/workflow.py), [`domain.py`](../../src/support_agent/domain.py), [`synthetic_retailer.py`](../../src/support_agent/synthetic_retailer.py) |
+| Idempotent execution and tracing | [`execution.py`](../../src/support_agent/execution.py), [`tracing.py`](../../src/support_agent/tracing.py) |
+| Evals and failure regressions | [`extraction_evaluation.py`](../../src/support_agent/extraction_evaluation.py), [`trajectory_evaluation.py`](../../src/support_agent/trajectory_evaluation.py), [`failures.py`](../../src/support_agent/failures.py), [`tests/`](../../tests) |
+| Demo entry point | [`demo.py`](../../src/support_agent/demo.py), [`demo_server.py`](../../src/support_agent/demo_server.py) |
+| Economics and rollout | [deployment arithmetic](docs/05-deployment-arithmetic.md), [production rollout](docs/06-production-rollout.md) |
 
 ## Limitations
 
-- The retailer, policies, cases, and integrations are synthetic; no real customer data is used.
-- Adapter calls and execution are local synthetic stand-ins, not real retailer or carrier APIs.
-- Case state, traces, and the execution registry are in process, with no durable persistence,
-  checkpointing, or restart recovery.
-- The live extraction evaluation set is intentionally small and cannot establish production model
-  performance.
-- Production identity, secrets, observability, incident operations, infrastructure, and real
-  integrations are described in the rollout plan, not built.
+- Retailer data, integrations, policies, and cases are synthetic; no real customer data is used.
+- State, traces, and the execution registry are local and in memory, with no durable persistence or restart recovery.
+- Production authentication, incident operations, infrastructure, and real integrations are not built.
+- The live evaluation set is limited; this is not evidence of production performance or realized ROI.

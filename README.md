@@ -1,66 +1,30 @@
 # Enterprise AI Deployment Lab
 
-This repository is a hands-on, personal engineering lab for learning how enterprise AI systems
-are actually understood, designed, built, evaluated, broken, repaired, and deployed. It is not a
-product, a framework, or a portfolio of finished tools. It is a record of deliberate practice.
+Hands-on projects for designing, implementing, evaluating, and preparing AI systems for deployment in real operational workflows.
 
-## Why this exists
+This repository is a personal engineering lab, not a production product or vendor framework. Its purpose is to practice the full deployment problem: understand a workflow, define AI boundaries, implement the system, evaluate failures, reason about economics, and design a safe path to production.
 
-Most AI tutorials teach model calls. They rarely teach the parts of the job that determine
-whether an AI system survives contact with a real organization: understanding the actual
-workflow being changed, designing around failure, proving the system is worth the cost of
-running it, and getting humans to trust and adopt it. This lab exists to practice those parts
-directly, project by project.
+## Flagship project: Delivered-Not-Received Support Agent
 
-## Learning sequence: Reality → Build → Break → Repair → Abstract
+A synthetic ecommerce-retailer workflow for customers whose package is marked delivered but cannot be found. A bounded LLM extracts validated structure from the customer message; deterministic code retrieves customer, order, shipment, and carrier evidence, applies policy and disposition rules, checks authority, and either executes an idempotent refund or escalates for human review.
 
-Every project in this lab is expected to move through the same sequence:
+Each run has explicit workflow state and an inspectable append-only trace, backed by an offline evaluation suite and a staged rollout and business-case design. See the [project README](projects/support-agent/README.md).
 
-1. **Reality** — Understand the real workflow, the real stakeholders, and the real constraints
-   before writing any system design. Assumptions get named explicitly, not silently baked in.
-2. **Build** — Design and implement the smallest system that could plausibly work, with clear
-   boundaries and ownership.
-3. **Break** — Deliberately probe the system for failure: bad inputs, edge cases, adversarial
-   use, cost blowups, silent errors.
-4. **Repair** — Fix what breaks, and record why it broke and what the fix actually changed.
-5. **Abstract** — Extract what is reusable (patterns, checklists, evaluation harnesses, decision
-   frameworks) so the next project starts from a higher floor, not from scratch.
+### What this project demonstrates
 
-Skipping a stage is a choice that should be named, not a default.
+- Bounded LLM use for natural-language extraction
+- Deterministic orchestration, policy, and workflow state
+- Clear tool and external-API boundaries
+- Safe consequential actions with authorization and idempotency
+- Human escalation and failure handling
+- Trace-based observability and reconstructable decisions
+- Outcome, trajectory, safety, and recovery evaluation
+- Evidence-gated rollout planning and synthetic deployment economics
 
-## First project: Enterprise Customer Support Agent
+## How the lab works
 
-The first project (`projects/support-agent/`) works through a realistic enterprise scenario: a
-customer support workflow where AI assistance is proposed as a way to reduce missed or delayed
-responses. The project starts with understanding the current, human workflow before any system
-design happens. See `projects/support-agent/README.md` for the current phase and planned
-lifecycle.
+Projects follow **Reality → Build → Break → Repair → Abstract**: investigate the operational workflow first; build the smallest credible system; probe its failure modes; repair with evidence; then capture reusable patterns. The [lab operating standard](docs/lab-operating-standard.md) defines the evidence expected across discovery, design, evaluation, economics, adoption, and reuse.
 
-## Core system concerns
+## Scope and limitations
 
-Across every project in this lab, the following are treated as first-class engineering concerns,
-not optional polish added at the end:
-
-- **Evaluation** — how do we know the system works, and works well enough?
-- **Observability** — can we see what the system is doing and why, in production and in testing?
-- **Failure recovery** — what happens when the system is wrong, slow, or unavailable?
-- **Security** — what can go wrong if the system is misused, and what is exposed if it fails?
-- **Human escalation** — when and how does a human take over?
-- **Adoption** — will the people who are supposed to use or benefit from this system actually
-  use it, and what would stop them?
-- **Economics** — what does running this system cost, and is that cost justified?
-
-A project is not considered complete until it has addressed these concerns, not just produced a
-working demo. See `docs/lab-operating-standard.md` for the full standard.
-
-Repository instructions in `AGENTS.md` currently govern approval, batching, and budget safety for
-future paid model calls. Code-level token tracking, cost accounting, and spending enforcement have
-not yet been built; the application does not currently claim to provide those controls.
-
-## What this repository is — and isn't
-
-This repository is a **learning and engineering record**. It documents reasoning, decisions,
-failures, and iteration. It is **not** evidence of a production deployment, a certified
-enterprise system, or a vendor-ready product. Any claims about system behavior, cost, or
-performance in this repo reflect lab conditions and stated assumptions, not live enterprise
-usage, unless explicitly noted otherwise.
+This is a learning and engineering record, not evidence of a production deployment or realized business results. Project data, integrations, policies, and assumptions are explicitly labeled where synthetic; claims about behavior, cost, and performance apply only to the documented lab conditions.
