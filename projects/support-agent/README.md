@@ -18,6 +18,12 @@ The browser demo is a lightweight trace and evaluation inspector. It presents a 
 - Refund exceeding autonomous authority
 - Refund execution failure
 
+### End-to-end demo
+
+![End-to-end support-agent demo showing customer outcome and runtime trace](assets/demo-overview.png)
+
+A representative successful run shows the customer interaction, resulting refund, and the ordered runtime trace used to inspect how the workflow reached that outcome.
+
 ## Architecture
 
 ```mermaid
@@ -42,11 +48,24 @@ flowchart LR
     REVIEW -.-> TRACE
 ```
 
-This is a modular monolith / local lab implementation, not a microservices design. The deterministic path is: customer message → bounded extraction → validation and routing → evidence retrieval → address comparison → structural gate → disposition → authorization → idempotent execution → closure or human escalation → trace.
+This is a modular monolith / local lab implementation, not a microservices design. The deterministic path is:
+
+**Customer message → bounded extraction → validation and routing → evidence retrieval → address comparison → structural gate → disposition → authorization → idempotent execution → closure or human escalation → trace.**
 
 ## AI vs. deterministic
 
-The LLM is used only where natural-language interpretation is needed: turning a customer message into a fixed, validated extraction contract. Deterministic logic owns validation, routing, evidence retrieval, the structural gate and policy, disposition, authorization, execution, state transitions, and tracing.
+The LLM is used only where natural-language interpretation is needed: turning a customer message into a fixed, validated extraction contract.
+
+Deterministic logic owns:
+
+- validation and routing
+- evidence retrieval
+- the structural gate and policy
+- disposition
+- authorization
+- execution
+- state transitions
+- tracing
 
 The model does not decide policy, grant itself authority, or execute a refund.
 
@@ -57,6 +76,12 @@ The model does not decide policy, grant itself authority, or execute a refund.
 - Amount or currency mismatches and over-limit refunds block autonomous execution.
 - An execution failure preserves the selected disposition and routes the open case to human review.
 - A stable operation identity and execution registry suppress duplicate consequential actions.
+
+### Authorization before execution
+
+![Authorization trace showing refund amount, autonomous limit, and execution gate](assets/authorization-trace.png)
+
+Disposition and execution authority are intentionally separate. A refund can be the correct resolution while still requiring human approval if it falls outside the system's autonomous authority.
 
 Implementation and regression detail are linked below rather than duplicated here.
 
@@ -69,11 +94,21 @@ The displayed evidence is deterministic, offline synthetic-fixture replay with d
 - **Safety / authorization:** negative controls verify that execution cannot precede required decisions or exceed autonomous authority.
 - **Reliability / recovery:** dependency and execution-failure regressions, plus idempotency and duplicate suppression.
 
+### Evaluation inspector
+
+![Evaluation inspector showing extraction, workflow, authorization, and recovery checks](assets/evaluation-inspector.png)
+
+The evaluation view separates model-boundary behavior from workflow correctness, authorization safety, and recovery behavior. The expanded example above verifies that a $150 refund against a $100 autonomous limit is blocked before execution and routed to human review.
+
 The full offline suite currently passes **265 tests** and makes no paid model calls.
 
 ## Business case and rollout
 
-The business case is synthetic and assumption-driven. Its value model compares released support capacity, avoided compensation, possible carrier recovery, and operating cost. The rollout is evidence-gated: discovery → shadow → human-reviewed pilot → limited autonomy → controlled expansion.
+The business case is synthetic and assumption-driven. Its value model compares released support capacity, avoided compensation, possible carrier recovery, and operating cost.
+
+The rollout is evidence-gated:
+
+**Discovery → shadow mode → human-reviewed pilot → limited autonomy → controlled expansion**
 
 See [deployment arithmetic](docs/05-deployment-arithmetic.md) and the [production rollout plan](docs/06-production-rollout.md).
 
@@ -86,19 +121,21 @@ uv sync
 source .venv/bin/activate
 ```
 
-Offline (scripted extraction; no API key or paid call):
+Offline, with scripted extraction and no API key or paid call:
 
 ```bash
 python -m support_agent.demo_server
 ```
 
-Live-enabled (explicit opt-in):
+Live-enabled, as an explicit opt-in:
 
 ```bash
 python -m support_agent.demo_server --enable-live
 ```
 
-Live mode requires `ANTHROPIC_API_KEY` and calls the provider only when **Run case** is selected. Keep the key in an untracked `.env` (copy from `.env.example`) and follow the paid-call approval and cost-reporting requirements in [`AGENTS.md`](../../AGENTS.md). Routine offline tests remain separate:
+Live mode requires `ANTHROPIC_API_KEY` and calls the provider only when **Run case** is selected. Keep the key in an untracked `.env` copied from `.env.example` and follow the paid-call approval and cost-reporting requirements in [`AGENTS.md`](../../AGENTS.md).
+
+Run the routine offline suite with:
 
 ```bash
 python -m unittest discover -s tests
