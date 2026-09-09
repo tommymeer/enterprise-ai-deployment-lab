@@ -1,118 +1,93 @@
 # Delivered-Not-Received Support Agent
 
-## What this is
+A synthetic ecommerce support workflow for customers whose package is marked delivered but cannot be found.
 
-A synthetic ecommerce support workflow for a customer whose package is marked delivered but cannot be found.
+The system uses an LLM for one bounded task: turning the customer message into validated structured data. Deterministic code owns evidence retrieval, policy, authorization, execution, state, and tracing.
 
-A bounded LLM converts the customer message into a validated schema. Deterministic workflow logic retrieves retailer and carrier evidence, applies a structural evidence gate and disposition rule, checks autonomous authority, and either executes an idempotent refund or escalates safely. Explicit state and append-only tracing make each run inspectable and reconstructable.
+**Synthetic data · Local lab implementation · Not a production deployment**
 
-Retailer and integration data are synthetic. This is a local lab implementation, not a production deployment.
+## 🚀 Demo
 
-## What the demo shows
-
-The browser demo is a lightweight trace and evaluation inspector. It presents a customer scenario alongside one end-to-end runtime trace: model call and validation, tools, decisions, authority, execution, state, and expandable technical evidence. It also includes an architecture view, evaluation inspector, and selectable **Demo paths** for:
-
-- Normal autonomous refund
-- Order not found
-- Carrier evidence unavailable
-- Refund exceeding autonomous authority
-- Refund execution failure
-
-### End-to-end demo
+The browser demo exposes the customer outcome and the ordered runtime trace behind it.
 
 ![End-to-end support-agent demo showing customer outcome and runtime trace](assets/demo-overview.png)
 
-A representative successful run shows the customer interaction, resulting refund, and the ordered runtime trace used to inspect how the workflow reached that outcome.
+Demo paths include:
 
-## Architecture
+`autonomous refund` · `order not found` · `carrier unavailable` · `over-limit refund` · `execution failure`
+
+## 🧠 System design
 
 ```mermaid
 flowchart LR
-    MESSAGE[Customer message] --> EXTRACT[Bounded LLM extraction]
-    EXTRACT --> VALIDATE[Deterministic validation / routing]
-    VALIDATE --> EVIDENCE[Customer, order, shipment, carrier evidence + address comparison]
-    EVIDENCE --> GATE[Structural evidence gate]
-    GATE --> DISPOSITION[Deterministic disposition]
-    DISPOSITION --> AUTHORIZATION[Authorization]
-    AUTHORIZATION -->|permitted| EXECUTION[Idempotent execution]
-    AUTHORIZATION -->|blocked| REVIEW[Human escalation]
-    EXECUTION -->|success| CLOSE[Closure]
-    EXECUTION -->|failure| REVIEW
-    TRACE[Append-only trace]
-    EXTRACT -.-> TRACE
-    VALIDATE -.-> TRACE
-    EVIDENCE -.-> TRACE
-    DISPOSITION -.-> TRACE
-    AUTHORIZATION -.-> TRACE
-    EXECUTION -.-> TRACE
-    REVIEW -.-> TRACE
+    A[Customer message] --> B[LLM: structured extraction]
+    B --> C[Deterministic workflow<br/>evidence → policy → disposition]
+    C --> D{Authorized?}
+    D -->|yes| E[Idempotent execution]
+    D -->|no| F[Human review]
+    E --> G[Closure]
+    E -.-> H[Append-only trace]
+    F -.-> H
+    C -.-> H
 ```
 
-This is a modular monolith / local lab implementation, not a microservices design. The deterministic path is:
+The core boundary is deliberate:
 
-**Customer message → bounded extraction → validation and routing → evidence retrieval → address comparison → structural gate → disposition → authorization → idempotent execution → closure or human escalation → trace.**
+- **LLM:** interpret natural language into a fixed, validated contract
+- **Deterministic system:** retrieve evidence, apply policy, select disposition, check authority, execute, transition state, and trace
 
-## AI vs. deterministic
+The model does **not** decide policy, grant itself authority, or execute a refund.
 
-The LLM is used only where natural-language interpretation is needed: turning a customer message into a fixed, validated extraction contract.
+A second design choice matters just as much: **the correct resolution and the authority to execute it are separate decisions.** A refund can be appropriate while still requiring human approval.
 
-Deterministic logic owns:
+## 🛡️ Safety and failure handling
 
-- validation and routing
-- evidence retrieval
-- the structural gate and policy
-- disposition
-- authorization
-- execution
-- state transitions
-- tracing
+The workflow fails closed around consequential actions:
 
-The model does not decide policy, grant itself authority, or execute a refund.
+- invalid or ungrounded model output is rejected before entering the trusted workflow
+- missing customer, order, or carrier evidence cannot be invented
+- currency mismatches and over-limit refunds block autonomous execution
+- execution failures preserve the case and route it to human review
+- stable operation identity and an execution registry suppress duplicate actions
 
-## Safety and failure handling
+## 🧪 Evaluation
 
-- Invalid or ungrounded model output is rejected before it enters the trusted workflow.
-- An unknown order fails safely; unavailable carrier evidence does not become invented evidence.
-- Amount or currency mismatches and over-limit refunds block autonomous execution.
-- An execution failure preserves the selected disposition and routes the open case to human review.
-- A stable operation identity and execution registry suppress duplicate consequential actions.
+**265 offline tests currently pass with no paid model calls.**
 
-### Authorization before execution
+The routine suite uses synthetic fixture replay and deterministic validators rather than an LLM-as-judge. It evaluates four separate properties:
 
-![Authorization trace showing refund amount, autonomous limit, and execution gate](assets/authorization-trace.png)
+- **Extraction:** contract correctness, semantic robustness, and identifier grounding
+- **Workflow:** outcome correctness and trajectory correctness
+- **Authorization:** execution cannot precede required decisions or exceed configured authority
+- **Recovery:** dependency failures, execution failures, idempotency, and duplicate suppression
 
-Disposition and execution authority are intentionally separate. A refund can be the correct resolution while still requiring human approval if it falls outside the system's autonomous authority.
+This distinction matters: a correct final answer does not count as success if the system reached it through an unsafe sequence.
 
-Implementation and regression detail are linked below rather than duplicated here.
+→ [`tests/`](../../tests) · [`extraction_evaluation.py`](../../src/support_agent/extraction_evaluation.py) · [`trajectory_evaluation.py`](../../src/support_agent/trajectory_evaluation.py)
 
-## Evaluation
+## 📈 Deployment thinking
 
-The displayed evidence is deterministic, offline synthetic-fixture replay with deterministic validators and graders; it does not report retained live-provider performance. Live model evaluation runners exist separately. The automated suite uses neither an LLM-as-judge nor a human grader.
-
-- **Extraction behavior:** nine-field contract checks, semantic robustness, and identifier-grounding / hallucination rejection.
-- **Workflow correctness:** outcome evaluation is separate from trajectory evaluation, so a successful result cannot conceal an unsafe action sequence.
-- **Safety / authorization:** negative controls verify that execution cannot precede required decisions or exceed autonomous authority.
-- **Reliability / recovery:** dependency and execution-failure regressions, plus idempotency and duplicate suppression.
-
-### Evaluation inspector
-
-![Evaluation inspector showing extraction, workflow, authorization, and recovery checks](assets/evaluation-inspector.png)
-
-The evaluation view separates model-boundary behavior from workflow correctness, authorization safety, and recovery behavior. The expanded example above verifies that a $150 refund against a $100 autonomous limit is blocked before execution and routed to human review.
-
-The full offline suite currently passes **265 tests** and makes no paid model calls.
-
-## Business case and rollout
-
-The business case is synthetic and assumption-driven. Its value model compares released support capacity, avoided compensation, possible carrier recovery, and operating cost.
-
-The rollout is evidence-gated:
+The project also models how this system would move toward production rather than treating a working demo as sufficient evidence.
 
 **Discovery → shadow mode → human-reviewed pilot → limited autonomy → controlled expansion**
 
-See [deployment arithmetic](docs/05-deployment-arithmetic.md) and the [production rollout plan](docs/06-production-rollout.md).
+The business case is synthetic and assumption-driven. It models released support capacity, avoided compensation, potential carrier recovery, and operating cost.
 
-## Run locally
+→ [Deployment arithmetic](docs/05-deployment-arithmetic.md) · [Production rollout plan](docs/06-production-rollout.md)
+
+## 🔎 Inspect the implementation
+
+| Area | Evidence |
+| --- | --- |
+| Workflow and business context | [Business context](docs/01-business-context.md) · [Current workflow](docs/02-current-workflow.md) |
+| System boundaries and tradeoffs | [System boundaries](docs/03-system-boundaries.md) · [Decision log](docs/04-decision-log.md) |
+| Model boundary | [`extraction.py`](../../src/support_agent/extraction.py) · [`modeling.py`](../../src/support_agent/modeling.py) · [`anthropic_adapter.py`](../../src/support_agent/anthropic_adapter.py) |
+| Workflow and state | [`workflow.py`](../../src/support_agent/workflow.py) · [`domain.py`](../../src/support_agent/domain.py) |
+| Execution and tracing | [`execution.py`](../../src/support_agent/execution.py) · [`tracing.py`](../../src/support_agent/tracing.py) |
+| Evals and regressions | [`tests/`](../../tests) · [`failures.py`](../../src/support_agent/failures.py) |
+
+<details>
+<summary><strong>Run locally</strong></summary>
 
 From the repository root:
 
@@ -121,42 +96,31 @@ uv sync
 source .venv/bin/activate
 ```
 
-Offline, with scripted extraction and no API key or paid call:
+Run offline with scripted extraction and no API key:
 
 ```bash
 python -m support_agent.demo_server
 ```
 
-Live-enabled, as an explicit opt-in:
+Run with live model extraction:
 
 ```bash
 python -m support_agent.demo_server --enable-live
 ```
 
-Live mode requires `ANTHROPIC_API_KEY` and calls the provider only when **Run case** is selected. Keep the key in an untracked `.env` copied from `.env.example` and follow the paid-call approval and cost-reporting requirements in [`AGENTS.md`](../../AGENTS.md).
+Live mode requires `ANTHROPIC_API_KEY`.
 
-Run the routine offline suite with:
+Run the offline test suite:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-## Deep dive
+</details>
 
-| Topic | Evidence |
-| --- | --- |
-| Business context and workflow | [business context](docs/01-business-context.md), [current workflow](docs/02-current-workflow.md) |
-| System boundaries and design tradeoffs | [system boundaries](docs/03-system-boundaries.md), [decision log](docs/04-decision-log.md) |
-| Extraction and model boundary | [`extraction.py`](../../src/support_agent/extraction.py), [`modeling.py`](../../src/support_agent/modeling.py), [`anthropic_adapter.py`](../../src/support_agent/anthropic_adapter.py) |
-| Workflow, domain state, and synthetic evidence | [`workflow.py`](../../src/support_agent/workflow.py), [`domain.py`](../../src/support_agent/domain.py), [`synthetic_retailer.py`](../../src/support_agent/synthetic_retailer.py) |
-| Idempotent execution and tracing | [`execution.py`](../../src/support_agent/execution.py), [`tracing.py`](../../src/support_agent/tracing.py) |
-| Evals and failure regressions | [`extraction_evaluation.py`](../../src/support_agent/extraction_evaluation.py), [`trajectory_evaluation.py`](../../src/support_agent/trajectory_evaluation.py), [`failures.py`](../../src/support_agent/failures.py), [`tests/`](../../tests) |
-| Demo entry point | [`demo.py`](../../src/support_agent/demo.py), [`demo_server.py`](../../src/support_agent/demo_server.py) |
-| Economics and rollout | [deployment arithmetic](docs/05-deployment-arithmetic.md), [production rollout](docs/06-production-rollout.md) |
+## ⚠️ Limitations
 
-## Limitations
-
-- Retailer data, integrations, policies, and cases are synthetic; no real customer data is used.
-- State, traces, and the execution registry are local and in memory, with no durable persistence or restart recovery.
-- Production authentication, incident operations, infrastructure, and real integrations are not built.
-- The live evaluation set is limited; this is not evidence of production performance or realized ROI.
+- Retailer data, integrations, policies, and cases are synthetic.
+- State, traces, and the execution registry are local and in memory.
+- Production authentication, durable infrastructure, incident operations, and real integrations are not implemented.
+- The offline evaluation suite is not evidence of production model performance or realized ROI.
