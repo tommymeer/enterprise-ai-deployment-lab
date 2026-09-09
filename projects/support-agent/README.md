@@ -50,7 +50,7 @@ The workflow fails closed around consequential actions:
 - execution failures preserve the case and route it to human review
 - stable operation identity and an execution registry suppress duplicate actions
 
-## 🧪 Evaluation
+## Evaluation
 
 **265 offline tests currently pass with no paid model calls.**
 
