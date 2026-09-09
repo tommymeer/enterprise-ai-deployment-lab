@@ -4,13 +4,14 @@ Hands-on projects for understanding how AI systems are designed, built, evaluate
 
 This is a personal engineering lab. The goal is not to build demos that look intelligent. It is to understand the full system around the model: workflow, orchestration, tools, state, controls, failures, evaluation, and rollout.
 
-## 🚀 Start here
+## 🚀 Explore the project
 
-[Support Agent walkthrough](./projects/support-agent/README.md) ·
-[Architecture](./projects/support-agent/README.md#architecture) ·
+[Project walkthrough](./projects/support-agent/README.md) ·
+[System design](./projects/support-agent/docs/03-system-boundaries.md) ·
 [Evaluation](./projects/support-agent/README.md#evaluation) ·
-[Business case & rollout](./projects/support-agent/README.md#business-case-and-rollout) ·
-[Deep dive](./projects/support-agent/README.md#deep-dive)
+[Deployment economics](./projects/support-agent/docs/05-deployment-arithmetic.md) ·
+[Production rollout](./projects/support-agent/docs/06-production-rollout.md) ·
+[Source code](./src/support_agent/)
 
 ## 🤖 Flagship: Delivered-Not-Received Support Agent
 
