@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -68,15 +69,20 @@ class DemoHandler(BaseHTTPRequestHandler):
         return
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the support-agent interview demo")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=os.environ.get("PORT", 8000))
     parser.add_argument("--enable-live", action="store_true",
         help="explicitly enable one-call live Claude extraction (requires ANTHROPIC_API_KEY)")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
     DemoHandler.live_enabled = args.enable_live
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), DemoHandler)
-    print(f"Support-agent demo: http://127.0.0.1:{args.port}")
+    server = ThreadingHTTPServer((args.host, args.port), DemoHandler)
+    print(f"Support-agent demo: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

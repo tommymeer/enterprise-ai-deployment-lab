@@ -4,7 +4,7 @@ import unittest
 from http import HTTPStatus
 from unittest.mock import patch
 
-from support_agent.demo_server import DemoHandler
+from support_agent.demo_server import DemoHandler, parse_args
 
 
 FIXTURE_MESSAGE = "My package says delivered, but I cannot find it. Order 12345."
@@ -29,6 +29,21 @@ def post_case(scenario_id: str) -> tuple[int, dict]:
 
 
 class DemoServerContractTests(unittest.TestCase):
+    def test_server_defaults_to_local_offline_mode(self):
+        with patch.dict("os.environ", {}, clear=True):
+            args = parse_args([])
+        self.assertEqual(args.host, "127.0.0.1")
+        self.assertEqual(args.port, 8000)
+        self.assertFalse(args.enable_live)
+
+    def test_server_accepts_explicit_public_host(self):
+        self.assertEqual(parse_args(["--host", "0.0.0.0"]).host, "0.0.0.0")
+
+    def test_port_environment_variable_is_used_unless_cli_port_is_supplied(self):
+        with patch.dict("os.environ", {"PORT": "8765"}, clear=True):
+            self.assertEqual(parse_args([]).port, 8765)
+            self.assertEqual(parse_args(["--port", "9876"]).port, 9876)
+
     def test_browser_payload_runs_both_scripted_execution_modes(self):
         expected = {
             "refund-success": ("closed", "succeeded"),
