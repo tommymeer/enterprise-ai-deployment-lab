@@ -1,0 +1,31 @@
+#!/bin/zsh
+set -e
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO"
+
+if [[ ! -x .venv/bin/python ]]; then
+  echo "Error: Python environment not found at $REPO/.venv"
+  echo "Run 'uv sync' from the repository root first."
+  exit 1
+fi
+
+if [[ ! -f .env ]]; then
+  echo "Error: $REPO/.env not found."
+  echo "Create the local .env file before using live mode."
+  exit 1
+fi
+
+set -a
+source .env
+set +a
+
+if [[ -z "$ANTHROPIC_API_KEY" ]]; then
+  echo "Error: ANTHROPIC_API_KEY is not set in .env."
+  exit 1
+fi
+
+echo "Starting Support Agent demo (live-enabled)..."
+echo "Provider calls occur only when you run a case."
+(sleep 1; open http://127.0.0.1:8000) &
+exec .venv/bin/python -m support_agent.demo_server --enable-live

@@ -1,0 +1,15 @@
+#!/bin/zsh
+set -e
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO"
+
+if [[ ! -x .venv/bin/python ]]; then
+  echo "Error: Python environment not found at $REPO/.venv"
+  echo "Run 'uv sync' from the repository root first."
+  exit 1
+fi
+
+echo "Starting Support Agent demo (offline)..."
+(sleep 1; open http://127.0.0.1:8000) &
+exec .venv/bin/python -m support_agent.demo_server
