@@ -8,6 +8,10 @@ The system uses an LLM for one bounded task: turning the customer message into v
 
 ## 🚀 Demo
 
+**[Try the public demo](https://support-agent-demo-maxa.onrender.com)**
+
+The hosted version runs in offline/scripted mode and makes no provider calls. Free hosting may take ~30–60 seconds to wake after inactivity.
+
 The browser demo exposes the customer outcome and the ordered runtime trace behind it.
 
 ![End-to-end support-agent demo showing customer outcome and runtime trace](assets/demo-overview.png)
@@ -102,7 +106,7 @@ Run offline with scripted extraction and no API key:
 python -m support_agent.demo_server
 ```
 
-Run with live model extraction:
+Run locally with live model extraction:
 
 ```bash
 python -m support_agent.demo_server --enable-live
